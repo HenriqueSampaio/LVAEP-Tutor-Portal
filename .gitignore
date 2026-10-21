@@ -1,0 +1,7 @@
+data/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Client source documents (not for a public repo)
+*.pdf
