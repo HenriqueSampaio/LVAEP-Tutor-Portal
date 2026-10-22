@@ -64,6 +64,9 @@ class Client:
 
 
 def start_server():
+    # Never wipe a real database: app.db must have been imported after LVAEP_DB was pointed at TMP.
+    if not db.DB_PATH.startswith(TMP):
+        raise RuntimeError(f"Refusing to reset {db.DB_PATH}: tests must use a temporary database.")
     for suffix in ("", "-wal", "-shm"):
         if os.path.exists(db.DB_PATH + suffix):
             os.remove(db.DB_PATH + suffix)

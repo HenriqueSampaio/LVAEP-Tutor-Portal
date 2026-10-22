@@ -15,7 +15,7 @@ python3 server.py            # http://localhost:8070 — loads demo data on firs
 python3 server.py --reset    # wipe and reload the demo data
 python3 server.py --reset --empty   # empty system with one admin (admin@lvaep.example / demo1234)
 python3 server.py --host 0.0.0.0    # open it from a phone on the same Wi-Fi
-python3 -m unittest discover -s tests -t . -v   # acceptance tests (14)
+python3 -m unittest discover -s tests -t . -v   # acceptance + calendar tests (24)
 ```
 
 Demo accounts (password `demo1234`): **dana@lvaep.example** (staff), **maria@tutors.example** and **james@tutors.example** (tutors). The login page has one-click buttons for them.
@@ -33,6 +33,7 @@ Set `LVAEP_TODAY=2026-10-31` to pretend it's another day (e.g. to see the last-d
 7. *Students* → open **Hyun Park** (dropped in August) to see that a drop is permanent and only staff can readmit. Open any active student to **Assign a tutor** (warns if the tutor has under 10 training hours or already has 5 students).
 8. *Tutors & accounts* → **Create account**: staff get a temporary password; the tutor must choose their own at first sign-in.
 9. *Activity log*: every staff correction, return, drop and readmission.
+10. **Calendar.** As Dana, open *Calendar*, pick a tutor and **Propose session**: it stays *Pending* (dashed outline) until the tutor answers. As Maria, *Requests* lists Dana's proposals: **Approve** one and **Reject** the other. Sessions Maria adds herself are confirmed at once, and the calendar refuses one that overlaps a confirmed session. On a confirmed session that has already happened, **Log hours** opens the usual log dialog pre-filled. Month, week and day views all work on a phone.
 
 ## What's built (PRD F1 + meeting notes)
 
@@ -48,6 +49,7 @@ Set `LVAEP_TODAY=2026-10-31` to pretend it's another day (e.g. to see the last-d
 | Admin creates tutor accounts (meeting) | Accounts with temp password + forced change; deactivate; reset |
 | Drop is permanent; readmission is admin-only (meeting) | Drop ends all assignments; readmit needs explicit confirmation |
 | Students can have several tutors; 10 h training before 3–5 students (meeting) | Multiple assignments per student; assignment warnings |
+| Session calendar: tutors schedule their own sessions; staff propose sessions the tutor must approve | Month / week / day calendar; pending → confirmed / rejected; cancel with reason; no overlapping confirmed sessions; group sessions; notifications both ways; staff actions audited |
 | Exceptions: missing hours, duplicates, absences, holidays, stopped tutoring, corrections (PRD) | Validation + attendance codes + leaving fields + return/reopen |
 
 ## Assumptions on open PRD decisions (need client sign-off)
@@ -61,18 +63,21 @@ Set `LVAEP_TODAY=2026-10-31` to pretend it's another day (e.g. to see the last-d
 - **Leaving:** the tutor reports date + reason, and staff are notified. Only staff change the student's status (pause or permanent drop).
 - **Notifications:** shown in the app only. Each one is stored with `email_status`, so email can be added once LVAEP picks a provider.
 - **Month cutoff:** the current month can be submitted early (with a warning); future months cannot.
+- **Calendar vs. hours:** scheduled sessions (calendar) are kept separate from logged hours (monthly report). A scheduled session doesn't count toward hours until the tutor logs it, which **Log hours** makes a one-click step.
+- **Calendar permissions:** tutors cancel sessions on their own calendar; staff can withdraw their own pending proposals and cancel any session (logged). Staff can't propose sessions on past dates, but tutors can record ones that already happened. A pending proposal that overlaps a confirmed session is refused up front.
 
 ## Code map
 
 ```
 server.py              entry point (flags above)
-app/db.py              schema, domain rules, report bundle (totals, FY breakdown)
-app/server.py          HTTP server + JSON API, role/assignment access checks
+app/db.py              schema, domain rules, report bundle (totals, FY breakdown), calendar queries
+app/server.py          HTTP server + JSON API, role/assignment access checks, /api/calendar routes
 app/reminders.py       month-end / overdue / weekly reminder rules (run every 30 min, idempotent)
 app/exports.py         CSV exports and the printable monthly form
 app/seed.py            synthetic demo data, generated relative to today
 static/                single-page app (vanilla JS, no build step)
 tests/test_acceptance.py  end-to-end API tests
+tests/test_calendar.py    calendar scheduling, approval and permission tests
 data/lvaep.sqlite3     created on first run (gitignore it)
 ```
 

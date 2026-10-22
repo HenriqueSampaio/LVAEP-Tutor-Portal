@@ -146,7 +146,12 @@ def me(ctx):
     unread = ctx.conn.execute(
         "SELECT COUNT(*) AS c FROM notifications WHERE user_id = ? AND read_at IS NULL", (ctx.user["id"],)
     ).fetchone()["c"]
-    return {"user": user_public(ctx.user), "unread": unread}
+    pending = 0
+    if not ctx.is_staff:
+        pending = ctx.conn.execute(
+            "SELECT COUNT(*) AS c FROM calendar_events WHERE tutor_id = ? AND status = 'pending'", (ctx.user["id"],)
+        ).fetchone()["c"]
+    return {"user": user_public(ctx.user), "unread": unread, "pending_requests": pending}
 
 
 @route("POST", "/api/me/password")
@@ -329,11 +334,7 @@ def _validate_session(ctx, body, tutor_id, student_id, existing_id=None):
         tut = hw = 0.0
     elif tut + hw <= 0:
         raise ApiError(400, "Enter tutoring or homework hours for a session the student attended.")
-    a = ctx.conn.execute(
-        """SELECT 1 FROM assignments WHERE tutor_id = ? AND student_id = ? AND start_date <= ?
-           AND (end_date IS NULL OR end_date >= ?)""",
-        (tutor_id, student_id, date.isoformat(), date.isoformat())).fetchone()
-    if not a:
+    if not db.assignment_covers(ctx.conn, tutor_id, student_id, date.isoformat()):
         raise ApiError(400, "That date is outside this tutor's assignment period for the student.")
     dup = ctx.conn.execute(
         "SELECT id FROM sessions WHERE tutor_id = ? AND student_id = ? AND date = ? AND id != ?",
@@ -393,6 +394,258 @@ def session_delete(ctx):
     ctx.conn.execute("DELETE FROM sessions WHERE id = ?", (s["id"],))
     _session_audit(ctx, "session.delete", s["tutor_id"], s["student_id"], s["date"])
     return {"ok": True}
+
+
+# ---------- calendar (scheduled sessions) ----------
+
+TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+CALENDAR_MAX_DAYS = 62
+
+
+def clock(t):
+    """'18:30' -> '6:30 PM'."""
+    h, m = (int(x) for x in t.split(":"))
+    return f"{(h % 12) or 12}:{m:02d} {'AM' if h < 12 else 'PM'}"
+
+
+def event_label(ev):
+    students = ", ".join(s["name"] for s in ev["students"]) or "no students"
+    d = dt.date.fromisoformat(ev["date"])
+    when = f"{d:%a %b} {d.day}"
+    return f"{students} on {when}, {clock(ev['start_time'])}–{clock(ev['end_time'])}"
+
+
+def event_link(ev, staff=False):
+    link = f"#/calendar?view=week&date={ev['date']}&event={ev['id']}"
+    return link + f"&tutor={ev['tutor_id']}" if staff else link
+
+
+def check_event_access(ctx):
+    """Load the event in the URL. Tutors only reach events on their own calendar; staff reach all."""
+    ev = db.calendar_event(ctx.conn, int(ctx.params["id"]))
+    if not ev:
+        raise ApiError(404, "Session not found.")
+    if not ctx.is_staff and ev["tutor_id"] != ctx.user["id"]:
+        raise ApiError(403, "This session isn't on your calendar.")
+    return ev
+
+
+def event_actions(ctx, ev):
+    """What the signed-in user may do with an event (the UI shows exactly these buttons)."""
+    status, acts = ev["status"], []
+    if ctx.is_staff:
+        if status == "pending" and ev["created_by"] == ctx.user["id"]:
+            acts += ["edit", "cancel"]
+        elif status in ("pending", "confirmed"):
+            acts.append("cancel")
+    elif ev["tutor_id"] == ctx.user["id"]:
+        if status == "pending":
+            acts += ["approve", "reject"]
+        elif status == "confirmed":
+            acts += ["edit", "cancel"]
+            if ev["date"] <= db.today().isoformat():
+                acts.append("log_hours")
+    return acts
+
+
+def with_actions(ctx, events):
+    return [{**ev, "actions": event_actions(ctx, ev)} for ev in events]
+
+
+def _calendar_tutor(ctx, raw, allow_all=False):
+    """Which tutor's calendar a request is about. Tutors can only ever name themselves."""
+    if not ctx.is_staff:
+        if raw not in (None, "", str(ctx.user["id"]), ctx.user["id"]):
+            raise ApiError(403, "You can only use your own calendar.")
+        return ctx.user["id"]
+    if allow_all and raw == "all":
+        return None
+    try:
+        tutor_id = int(raw)
+    except (TypeError, ValueError):
+        raise ApiError(400, "Choose a tutor.")
+    t = ctx.conn.execute("SELECT * FROM users WHERE id = ? AND role = 'tutor'", (tutor_id,)).fetchone()
+    if not t:
+        raise ApiError(404, "Tutor not found.")
+    return tutor_id
+
+
+def _validate_event(ctx, body, tutor_id, existing_id=0):
+    need(body, "date", "start_time", "end_time")
+    date = parse_date(body["date"])
+    start, end = str(body["start_time"]), str(body["end_time"])
+    if not TIME_RE.match(start) or not TIME_RE.match(end):
+        raise ApiError(400, "Times must look like HH:MM (24-hour).")
+    if end <= start:
+        raise ApiError(400, "The end time must be after the start time.")
+    raw_ids = body.get("student_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        raise ApiError(400, "Choose at least one student.")
+    try:
+        student_ids = sorted({int(x) for x in raw_ids})
+    except (TypeError, ValueError):
+        raise ApiError(400, "Student ids must be numbers.")
+    for sid in student_ids:
+        s = ctx.conn.execute("SELECT first_name || ' ' || last_name AS n FROM students WHERE id = ?", (sid,)).fetchone()
+        if not s:
+            raise ApiError(404, "Student not found.")
+        if not db.assignment_covers(ctx.conn, tutor_id, sid, date.isoformat()):
+            raise ApiError(400, f"{s['n']} isn't assigned to this tutor on {date:%b} {date.day}.")
+    if ctx.is_staff:
+        tutor = ctx.conn.execute("SELECT active FROM users WHERE id = ?", (tutor_id,)).fetchone()
+        if not tutor["active"]:
+            raise ApiError(400, "That tutor's account is deactivated.")
+        if date < db.today():
+            raise ApiError(400, "Staff can't propose sessions on a past date.")
+    clash = db.confirmed_overlap(ctx.conn, tutor_id, date.isoformat(), start, end, existing_id)
+    if clash:
+        raise ApiError(409, f"This overlaps a confirmed session ({event_label(clash)}).", conflict_id=clash["id"])
+    return {"date": date.isoformat(), "start_time": start, "end_time": end, "student_ids": student_ids,
+            "notes": (body.get("notes") or "")[:1000]}
+
+
+def _save_students(conn, event_id, student_ids):
+    conn.execute("DELETE FROM calendar_event_students WHERE event_id = ?", (event_id,))
+    conn.executemany("INSERT INTO calendar_event_students (event_id, student_id) VALUES (?, ?)",
+                     [(event_id, sid) for sid in student_ids])
+
+
+@route("GET", "/api/calendar")
+def calendar_get(ctx):
+    start, end = parse_date(ctx.q("start"), "start"), parse_date(ctx.q("end"), "end")
+    if end < start:
+        raise ApiError(400, "'end' must be on or after 'start'.")
+    if (end - start).days > CALENDAR_MAX_DAYS:
+        raise ApiError(400, f"Ask for at most {CALENDAR_MAX_DAYS} days at a time.")
+    tutor_id = _calendar_tutor(ctx, ctx.q("tutor_id"), allow_all=True)
+    events = db.calendar_events(ctx.conn, tutor_id, start.isoformat(), end.isoformat())
+    return {"events": with_actions(ctx, events), "tutor_id": tutor_id}
+
+
+@route("GET", "/api/calendar/students")
+def calendar_students(ctx):
+    tutor_id = _calendar_tutor(ctx, ctx.q("tutor_id"))
+    date = parse_date(ctx.q("date") or db.today().isoformat())
+    rows = ctx.conn.execute(
+        """SELECT s.id, s.first_name || ' ' || s.last_name AS name, s.status FROM assignments a
+           JOIN students s ON s.id = a.student_id
+           WHERE a.tutor_id = ? AND a.start_date <= ? AND (a.end_date IS NULL OR a.end_date >= ?)
+           GROUP BY s.id ORDER BY s.last_name, s.first_name""",
+        (tutor_id, date.isoformat(), date.isoformat())).fetchall()
+    return {"items": [dict(r) for r in rows]}
+
+
+@route("GET", "/api/calendar/requests")
+def calendar_requests(ctx):
+    if ctx.is_staff:
+        events = db.calendar_events(ctx.conn, created_by=ctx.user["id"], newest_first=True)
+        events = [e for e in events if e["origin"] == "staff"]
+    else:
+        events = db.calendar_events(ctx.conn, tutor_id=ctx.user["id"], status="pending")
+    return {"events": with_actions(ctx, events)}
+
+
+@route("POST", "/api/calendar")
+def calendar_create(ctx):
+    tutor_id = _calendar_tutor(ctx, ctx.body.get("tutor_id"))
+    v = _validate_event(ctx, ctx.body, tutor_id)
+    origin = "staff" if ctx.is_staff else "tutor"
+    cur = ctx.conn.execute(
+        """INSERT INTO calendar_events (tutor_id, date, start_time, end_time, status, origin, notes, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (tutor_id, v["date"], v["start_time"], v["end_time"], "pending" if ctx.is_staff else "confirmed",
+         origin, v["notes"], ctx.user["id"]))
+    _save_students(ctx.conn, cur.lastrowid, v["student_ids"])
+    ev = db.calendar_event(ctx.conn, cur.lastrowid)
+    if ctx.is_staff:
+        db.notify(ctx.conn, tutor_id, "calendar",
+                  f"{ctx.user['name']} proposed a session: {event_label(ev)}. Please approve or reject it.",
+                  link=event_link(ev))
+        db.audit(ctx.conn, ctx.user["id"], "calendar.propose", f"{ev['tutor_name']}: {event_label(ev)}")
+    return {"event": with_actions(ctx, [ev])[0]}
+
+
+@route("PUT", r"/api/calendar/(?P<id>\d+)")
+def calendar_update(ctx):
+    ev = check_event_access(ctx)
+    if "edit" not in event_actions(ctx, ev):
+        if ev["status"] in ("rejected", "cancelled"):
+            raise ApiError(409, f"This session was {ev['status']} and can't be changed.")
+        if ctx.is_staff:
+            raise ApiError(403, "Staff can only edit pending sessions they proposed.")
+        raise ApiError(409, "Approve or reject this proposed session instead of editing it.")
+    v = _validate_event(ctx, ctx.body, ev["tutor_id"], ev["id"])
+    ctx.conn.execute(
+        "UPDATE calendar_events SET date = ?, start_time = ?, end_time = ?, notes = ?, updated_at = ? WHERE id = ?",
+        (v["date"], v["start_time"], v["end_time"], v["notes"], db.now_iso(), ev["id"]))
+    _save_students(ctx.conn, ev["id"], v["student_ids"])
+    ev = db.calendar_event(ctx.conn, ev["id"])
+    if ctx.is_staff:
+        db.notify(ctx.conn, ev["tutor_id"], "calendar",
+                  f"{ctx.user['name']} changed a proposed session: {event_label(ev)}. Please approve or reject it.",
+                  link=event_link(ev))
+        db.audit(ctx.conn, ctx.user["id"], "calendar.edit", f"{ev['tutor_name']}: {event_label(ev)}")
+    return {"event": with_actions(ctx, [ev])[0]}
+
+
+def _pending_for_tutor(ctx, verb):
+    ev = check_event_access(ctx)
+    if ev["status"] != "pending":
+        raise ApiError(409, f"Only pending sessions can be {verb}. This one is {ev['status']}.")
+    return ev
+
+
+@route("POST", r"/api/calendar/(?P<id>\d+)/approve", role="tutor")
+def calendar_approve(ctx):
+    ev = _pending_for_tutor(ctx, "approved")
+    clash = db.confirmed_overlap(ctx.conn, ev["tutor_id"], ev["date"], ev["start_time"], ev["end_time"], ev["id"])
+    if clash:
+        raise ApiError(409, f"This overlaps a confirmed session ({event_label(clash)}). Cancel or move that one first.",
+                       conflict_id=clash["id"])
+    ctx.conn.execute(
+        "UPDATE calendar_events SET status = 'confirmed', responded_by = ?, responded_at = ?, updated_at = ? WHERE id = ?",
+        (ctx.user["id"], db.now_iso(), db.now_iso(), ev["id"]))
+    db.notify(ctx.conn, ev["created_by"], "calendar", f"{ctx.user['name']} approved {event_label(ev)}.",
+              link=event_link(ev, staff=True))
+    return {"event": with_actions(ctx, [db.calendar_event(ctx.conn, ev["id"])])[0]}
+
+
+@route("POST", r"/api/calendar/(?P<id>\d+)/reject", role="tutor")
+def calendar_reject(ctx):
+    ev = _pending_for_tutor(ctx, "rejected")
+    note = (ctx.body.get("note") or "")[:500]
+    ctx.conn.execute(
+        """UPDATE calendar_events SET status = 'rejected', responded_by = ?, responded_at = ?, response_note = ?,
+           updated_at = ? WHERE id = ?""", (ctx.user["id"], db.now_iso(), note, db.now_iso(), ev["id"]))
+    db.notify(ctx.conn, ev["created_by"], "calendar",
+              f"{ctx.user['name']} rejected {event_label(ev)}" + (f": “{note[:200]}”" if note else "."),
+              link=event_link(ev, staff=True))
+    return {"event": with_actions(ctx, [db.calendar_event(ctx.conn, ev["id"])])[0]}
+
+
+@route("POST", r"/api/calendar/(?P<id>\d+)/cancel")
+def calendar_cancel(ctx):
+    ev = check_event_access(ctx)
+    if ev["status"] in ("rejected", "cancelled"):
+        raise ApiError(409, f"This session is already {ev['status']}.")
+    if "cancel" not in event_actions(ctx, ev):
+        raise ApiError(409, "Approve or reject this proposed session instead of cancelling it.")
+    reason = (ctx.body.get("reason") or "")[:500]
+    ctx.conn.execute(
+        """UPDATE calendar_events SET status = 'cancelled', cancelled_by = ?, cancelled_at = ?, cancel_reason = ?,
+           updated_at = ? WHERE id = ?""", (ctx.user["id"], db.now_iso(), reason, db.now_iso(), ev["id"]))
+    suffix = f": “{reason[:200]}”" if reason else "."
+    if ctx.is_staff:
+        withdrawn = ev["status"] == "pending" and ev["created_by"] == ctx.user["id"]
+        verb = "withdrew the proposed session" if withdrawn else "cancelled"
+        db.notify(ctx.conn, ev["tutor_id"], "calendar", f"{ctx.user['name']} {verb} {event_label(ev)}{suffix}",
+                  link=event_link(ev))
+        db.audit(ctx.conn, ctx.user["id"], "calendar.withdraw" if withdrawn else "calendar.cancel",
+                 f"{ev['tutor_name']}: {event_label(ev)}" + (f" ({reason[:200]})" if reason else ""))
+    elif ev["origin"] == "staff":
+        db.notify(ctx.conn, ev["created_by"], "calendar", f"{ctx.user['name']} cancelled {event_label(ev)}{suffix}",
+                  link=event_link(ev, staff=True))
+    return {"event": with_actions(ctx, [db.calendar_event(ctx.conn, ev["id"])])[0]}
 
 
 # ---------- staff: monthly overview ----------

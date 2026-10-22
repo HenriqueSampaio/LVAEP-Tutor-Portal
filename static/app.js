@@ -5,7 +5,8 @@ const $ = (sel, el = document) => el.querySelector(sel);
 const app = $('#app');
 const topbar = $('#topbar');
 const dialog = $('#dialog');
-const state = { me: null, unread: 0, meta: null, overview: null, ovFilter: 'all', ovSearch: '' };
+const state = { me: null, unread: 0, pending: 0, meta: null, overview: null, ovFilter: 'all', ovSearch: '',
+  cal: null, calEvents: new Map(), calTutors: null, calTutor: null, calShowRejected: false };
 
 /* ---------- safe HTML templating: every interpolation is escaped unless wrapped in raw() ---------- */
 class Safe { constructor(s) { this.s = s; } toString() { return this.s; } }
@@ -45,6 +46,17 @@ const isStaff = () => state.me && state.me.role === 'staff';
 const STATUS = { not_started: 'Not started', in_progress: 'In progress', returned: 'Needs changes', submitted: 'Submitted', reviewed: 'Reviewed' };
 const chip = (s) => html`<span class="chip ${s}">${STATUS[s] || s}</span>`;
 const studentChip = (s) => (s === 'active' ? '' : html` <span class="chip ${s}">${s === 'paused' ? 'Paused' : 'Dropped'}</span>`);
+const CAL_STATUS = { pending: 'Pending', confirmed: 'Confirmed', rejected: 'Rejected', cancelled: 'Cancelled' };
+const calChip = (s) => html`<span class="chip cal-${s}">${CAL_STATUS[s] || s}</span>`;
+const addDays = (iso, n) => { const d = parseD(iso); d.setDate(d.getDate() + n); return isoD(d); };
+const weekStart = (iso) => addDays(iso, -parseD(iso).getDay());
+const validISO = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s || '') && isoD(parseD(s)) === s;
+const toMin = (t) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+const fmtTime = (t) => { const [h, m] = t.split(':').map(Number); return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`; };
+const fmtRange = (a, b) => {
+  const [x, y] = [fmtTime(a), fmtTime(b)];
+  return x.slice(-2) === y.slice(-2) ? `${x.slice(0, -3)} – ${y}` : `${x} – ${y}`;
+};
 
 /* ---------- API ---------- */
 async function api(path, { method = 'GET', body } = {}) {
@@ -131,13 +143,15 @@ async function render() {
     if (path === '/login') return viewLogin();
     if (!state.me) {
       const r = await api('/api/me');
-      state.me = r.user; state.unread = r.unread;
+      state.me = r.user; state.unread = r.unread; state.pending = r.pending_requests;
     }
     if (state.me.must_change_password && path !== '/password') return go('#/password');
     renderTopbar(path);
     const staff = isStaff();
     let m;
     if (path === '/password') return viewPassword();
+    if (path === '/calendar') return await viewCalendar(q);
+    if (path === '/calendar/requests') return await viewRequests();
     if (staff) {
       if (path === '/staff') return await viewOverview(q);
       if ((m = path.match(/^\/staff\/report\/(\d+)\/(\d+)\/(\d{4}-\d{2})$/))) return await viewReport(+m[1], +m[2], m[3]);
@@ -162,9 +176,12 @@ async function render() {
 function renderTopbar(path) {
   topbar.hidden = false;
   const staff = isStaff();
-  const nav = [['/staff', 'Monthly reports'], ['/staff/students', 'Students'], ['/staff/tutors', 'Tutors & accounts'],
-    ['/staff/reminders', 'Reminders'], ['/staff/activity', 'Activity log']];
-  const active = (p) => path === p || (p === '/staff' && path.startsWith('/staff/report')) || (p === '/staff/students' && path.startsWith('/staff/students/'));
+  const requests = html`Requests${state.pending ? html` <span class="nav-count">${state.pending}</span>` : ''}`;
+  const nav = staff ? [['/staff', 'Monthly reports'], ['/calendar', 'Calendar'], ['/staff/students', 'Students'],
+    ['/staff/tutors', 'Tutors & accounts'], ['/staff/reminders', 'Reminders'], ['/staff/activity', 'Activity log']]
+    : [['/tutor', 'My students'], ['/calendar', 'Calendar'], ['/calendar/requests', requests]];
+  const active = (p) => path === p || (p === '/staff' && path.startsWith('/staff/report')) || (p === '/staff/students' && path.startsWith('/staff/students/'))
+    || (p === '/tutor' && path.startsWith('/tutor/')) || (staff && p === '/calendar' && path === '/calendar/requests');
   topbar.innerHTML = String(html`<div class="topbar-inner">
     <a class="brand" href="#/"><img src="/favicon.svg" alt=""><span>LVAEP Tutor Hours<small>Literacy Volunteers · Essex &amp; Passaic</small></span></a>
     <span class="spacer"></span>
@@ -173,7 +190,7 @@ function renderTopbar(path) {
     <a class="icon-btn" href="#/password" aria-label="Change password" title="Change password"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg></a>
     <button class="icon-btn" data-action="logout" aria-label="Sign out" title="Sign out">${icon('logout')}</button>
   </div>
-  ${staff ? html`<div class="subnav"><nav class="topnav" aria-label="Staff">${nav.map(([p, label]) => html`<a href="#${p}" ${active(p) ? raw('aria-current="page"') : ''}>${label}</a>`)}</nav></div>` : ''}`);
+  <div class="subnav"><nav class="topnav" aria-label="${staff ? 'Staff' : 'Tutor'}">${nav.map(([p, label]) => html`<a href="#${p}" ${active(p) ? raw('aria-current="page"') : ''}>${label}</a>`)}</nav></div>`);
 }
 
 function closeNotif() { const p = $('.notif-panel'); if (p) p.remove(); }
@@ -223,7 +240,7 @@ function viewLogin() {
       const r = await api('/api/login', { method: 'POST', body: data });
       state.me = r.user;
       const me = await api('/api/me');
-      state.unread = me.unread;
+      state.unread = me.unread; state.pending = me.pending_requests;
       go(r.user.must_change_password ? '#/password' : '#/');
     } catch (err) {
       const box = $('#login-form .error');
@@ -280,6 +297,10 @@ async function viewTutorHome(q) {
   const d = await api(`/api/tutor/home?month=${month}`);
   const open = d.students.filter((s) => ['not_started', 'in_progress', 'returned'].includes(s.status));
   const banners = [];
+  if (state.pending) {
+    banners.push(html`<div class="banner info">${icon('cal')}<div><b>Staff proposed ${state.pending} session${state.pending === 1 ? '' : 's'} for your calendar</b>
+      <p>Approve the ones that work for you. <a href="#/calendar/requests">Review requests →</a></p></div></div>`);
+  }
   for (const o of d.overdue) {
     banners.push(html`<div class="banner alert">${icon('alert')}<div><b>Your ${o.label} hours are overdue</b>
       <p>Please submit the month for ${o.students.join(', ')}.${o.month !== month ? html` <a href="#/tutor?month=${o.month}">Go to ${monthShort(o.month)} →</a>` : ''}</p></div></div>`);
@@ -501,10 +522,10 @@ function suggestDate(b) {
   return { min, max, value: candidate };
 }
 
-function sessionDialog(b, session) {
+function sessionDialog(b, session, preset = {}) {
   const isNew = !session;
   const range = suggestDate(b);
-  const s = session || { date: range.value, attendance: 'present', tutoring_hours: 2, homework_hours: 2, note: '' };
+  const s = session || { date: range.value, attendance: 'present', tutoring_hours: 2, homework_hours: 2, note: '', ...preset };
   const present = s.attendance === 'present';
   openDialog(html`<form>
     <h2>${isNew ? 'Log a session' : 'Edit session'} <span class="muted small" style="font-weight:400">· ${b.student.name}</span></h2>
@@ -837,6 +858,329 @@ async function viewActivity() {
     <tbody>${items.map((a) => html`<tr><td class="nowrap">${fmtDT(a.created_at)}</td><td class="nowrap">${a.user_name || '—'}</td><td class="nowrap"><code>${a.action}</code></td><td>${a.detail}</td></tr>`)}</tbody></table></div>`);
 }
 
+/* ---------- calendar (scheduled sessions) ---------- */
+const CAL_VIEWS = { month: 'Month', week: 'Week', day: 'Day' };
+const CAL_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+function calRange(view, date) {
+  if (view === 'day') return [date, date];
+  if (view === 'week') { const s = weekStart(date); return [s, addDays(s, 6)]; }
+  const m = date.slice(0, 7);
+  return [weekStart(`${m}-01`), addDays(weekStart(monthEnd(m)), 6)];
+}
+function calShift(view, date, dir) {
+  if (view === 'month') return `${shiftMonth(date.slice(0, 7), dir)}-01`;
+  return addDays(date, dir * (view === 'week' ? 7 : 1));
+}
+function calHref(o) {
+  const { view, date, tutor } = { ...state.cal, ...o };
+  return `#/calendar?view=${view}&date=${date}${isStaff() && tutor ? `&tutor=${tutor}` : ''}`;
+}
+const eventWho = (e) => `${state.cal && state.cal.tutor === 'all' ? `${e.tutor_name}: ` : ''}${e.students.map((s) => s.name).join(', ')}`;
+const eventTitle = (e) => `${fmtRange(e.start_time, e.end_time)} · ${eventWho(e)} · ${CAL_STATUS[e.status]}`;
+const hourLabel = (h) => `${h % 12 || 12} ${h < 12 || h === 24 ? 'AM' : 'PM'}`;
+
+async function viewCalendar(q) {
+  const staff = isStaff();
+  const view = CAL_VIEWS[q.view] ? q.view : 'week';
+  const date = validISO(q.date) ? q.date : today();
+  let tutor = null;
+  if (staff) {
+    const { items } = await api('/api/staff/tutors');
+    state.calTutors = items.filter((u) => u.role === 'tutor' && u.active);
+    tutor = q.tutor || state.calTutor || (state.calTutors[0] ? String(state.calTutors[0].id) : 'all');
+    if (tutor !== 'all' && !items.some((u) => String(u.id) === tutor && u.role === 'tutor')) tutor = 'all';
+    state.calTutor = tutor;
+  }
+  const [start, end] = calRange(view, date);
+  const d = await api(`/api/calendar?start=${start}&end=${end}${staff ? `&tutor_id=${tutor}` : ''}`);
+  state.cal = { view, date, tutor, start, end };
+  state.calEvents = new Map(d.events.map((e) => [e.id, e]));
+  const events = d.events.filter((e) => state.calShowRejected || e.status !== 'rejected');
+  const days = [];
+  for (let x = start; x <= end; x = addDays(x, 1)) days.push(x);
+  const title = view === 'month' ? monthLabel(date.slice(0, 7))
+    : view === 'week' ? `${fmtDate(start, { month: 'short', day: 'numeric' })} – ${fmtDate(end, { month: 'short', day: 'numeric', year: 'numeric' })}`
+      : fmtDate(date, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+  const tutorName = staff && tutor !== 'all' ? (calTutorName(tutor) || 'Tutor') : null;
+  const waiting = d.events.filter((e) => e.status === 'pending').length;
+
+  paint(html`
+    <div class="page-head">
+      <div><h1>${staff ? (tutorName ? `${tutorName}'s calendar` : 'All tutors') : 'Your calendar'}</h1>
+        <p class="muted" style="margin:2px 0 0">${staff ? 'Sessions you propose are pending until the tutor approves them.' : 'Sessions you add are confirmed right away. Staff proposals wait for your approval.'}</p></div>
+      <span class="spacer"></span>
+      ${staff ? html`<a class="btn" href="#/calendar/requests">Your proposals</a>`
+    : html`<a class="btn" href="#/calendar/requests">Requests${state.pending ? html` <span class="nav-count">${state.pending}</span>` : ''}</a>`}
+      <button class="btn primary" data-action="cal-new">${icon('plus')} ${staff ? 'Propose session' : 'New session'}</button>
+    </div>
+    ${!staff && waiting ? html`<div class="banner info">${icon('cal')}<div><b>${waiting} proposed session${waiting === 1 ? ' is' : 's are'} waiting for you in this view</b>
+      <p>Pending sessions have a dashed outline. Open one to approve or reject it, or <a href="#/calendar/requests">review all requests</a>.</p></div></div>` : ''}
+    <div class="cal-toolbar">
+      <div class="cal-nav">
+        <a class="btn sm" href="${calHref({ date: calShift(view, date, -1) })}" aria-label="Previous ${view}">‹</a>
+        <a class="btn sm" href="${calHref({ date: today() })}">Today</a>
+        <a class="btn sm" href="${calHref({ date: calShift(view, date, 1) })}" aria-label="Next ${view}">›</a>
+      </div>
+      <h2 class="cal-title">${title}</h2>
+      <span class="spacer"></span>
+      ${staff ? html`<select class="input" id="cal-tutor" aria-label="Tutor">
+        <option value="all" ${tutor === 'all' ? raw('selected') : ''}>All tutors</option>
+        ${state.calTutors.map((t) => html`<option value="${t.id}" ${String(t.id) === tutor ? raw('selected') : ''}>${t.name}</option>`)}</select>` : ''}
+      <nav class="cal-views" aria-label="Calendar view">${Object.entries(CAL_VIEWS).map(([k, v]) => html`<a href="${calHref({ view: k })}" ${k === view ? raw('aria-current="page"') : ''}>${v}</a>`)}</nav>
+      <label class="check cal-toggle"><input type="checkbox" id="cal-rejected" ${state.calShowRejected ? raw('checked') : ''}><span>Show rejected</span></label>
+    </div>
+    ${view === 'month' ? calMonth(days, events)
+    : view === 'week' ? html`<div class="cal-wide">${calGrid(days, events)}</div><div class="cal-narrow">${calAgenda(days, events)}</div>`
+      : calGrid(days, events)}
+    ${events.length ? '' : html`<p class="muted small" style="margin-top:10px">Nothing scheduled ${view === 'day' ? 'on this day' : `this ${view}`}.${view === 'month' ? '' : ' Click an empty time to add a session.'}</p>`}
+    <div class="cal-legend">${Object.entries(CAL_STATUS).filter(([k]) => k !== 'rejected' || state.calShowRejected).map(([k, v]) => html`<span><i class="${k}"></i>${v}</span>`)}</div>
+  `);
+  const sel = $('#cal-tutor');
+  if (sel) sel.addEventListener('change', () => { state.calTutor = sel.value; go(calHref({ tutor: sel.value })); });
+  $('#cal-rejected').addEventListener('change', (e) => { state.calShowRejected = e.target.checked; render(); });
+  if (q.event) {
+    // Opened from a notification: show the session once, then drop it from the URL so later renders don't reopen it.
+    history.replaceState(null, '', calHref({}));
+    const ev = state.calEvents.get(Number(q.event));
+    if (ev) eventDialog(ev);
+  }
+}
+
+function calTutorName(id) {
+  const t = (state.calTutors || []).find((u) => String(u.id) === String(id));
+  return t && t.name;
+}
+
+function byDate(events) {
+  const out = {};
+  events.forEach((e) => { (out[e.date] = out[e.date] || []).push(e); });
+  return out;
+}
+
+function calMonth(days, events) {
+  const month = state.cal.date.slice(0, 7);
+  const map = byDate(events);
+  return html`<div class="card cal-month">
+    ${CAL_WEEKDAYS.map((w) => html`<div class="cal-wd">${w}</div>`)}
+    ${days.map((day) => {
+    const list = map[day] || [];
+    const dayHref = calHref({ view: 'day', date: day });
+    return html`<div class="cal-cell ${day.slice(0, 7) !== month ? 'out' : ''} ${day === today() ? 'today' : ''}">
+      <a class="cal-num" href="${dayHref}" aria-label="${fmtDate(day, { weekday: 'long', month: 'long', day: 'numeric' })}${list.length ? `, ${list.length} session${list.length === 1 ? '' : 's'}` : ''}">${parseD(day).getDate()}</a>
+      <div class="cal-pills">${list.slice(0, 3).map((e) => html`<button type="button" class="cal-pill ${e.status}" data-action="cal-event" data-id="${e.id}" title="${eventTitle(e)}">
+        <b>${fmtTime(e.start_time).replace(':00', '')}</b> ${eventWho(e)}<span class="sr-only"> (${CAL_STATUS[e.status]})</span></button>`)}
+        ${list.length > 3 ? html`<a class="cal-more" href="${dayHref}">+${list.length - 3} more</a>` : ''}</div>
+      ${list.length ? html`<a class="cal-dots" href="${dayHref}" tabindex="-1" aria-hidden="true">${list.slice(0, 4).map((e) => html`<i class="${e.status}"></i>`)}</a>` : ''}
+    </div>`;
+  })}</div>`;
+}
+
+/** Side-by-side lanes for overlapping events: id -> { lane, lanes }. */
+function layoutLanes(list) {
+  const out = new Map();
+  const sorted = [...list].sort((a, b) => toMin(a.start_time) - toMin(b.start_time) || toMin(b.end_time) - toMin(a.end_time));
+  let cluster = []; let laneEnds = []; let clusterEnd = -1;
+  const flush = () => { cluster.forEach((id) => { out.get(id).lanes = laneEnds.length; }); cluster = []; laneEnds = []; };
+  for (const e of sorted) {
+    const s = toMin(e.start_time); const en = toMin(e.end_time);
+    if (s >= clusterEnd) flush();
+    let lane = laneEnds.findIndex((x) => x <= s);
+    if (lane === -1) { lane = laneEnds.length; laneEnds.push(en); } else laneEnds[lane] = en;
+    out.set(e.id, { lane, lanes: 1 });
+    cluster.push(e.id);
+    clusterEnd = Math.max(clusterEnd, en);
+  }
+  flush();
+  return out;
+}
+
+function calGrid(days, events) {
+  const startH = Math.min(7, ...events.map((e) => Math.floor(toMin(e.start_time) / 60)));
+  const endH = Math.max(21, ...events.map((e) => Math.ceil(toMin(e.end_time) / 60)));
+  const hours = [];
+  for (let h = startH; h < endH; h += 1) hours.push(h);
+  const map = byDate(events);
+  return html`<div class="card cal-grid ${days.length === 1 ? 'single' : ''}" style="--rows:${endH - startH};--cols:${days.length}">
+    <div class="cal-grid-head"><div></div>${days.map((d) => html`<a href="${calHref({ view: 'day', date: d })}" class="${d === today() ? 'today' : ''}"><span>${fmtDate(d, { weekday: 'short' })}</span><b>${parseD(d).getDate()}</b></a>`)}</div>
+    <div class="cal-grid-body">
+      <div class="cal-times" aria-hidden="true">${hours.map((h) => html`<div>${hourLabel(h)}</div>`)}</div>
+      ${days.map((d) => {
+    const list = map[d] || [];
+    const lanes = layoutLanes(list);
+    return html`<div class="cal-col ${d === today() ? 'today' : ''}" data-action="cal-slot" data-date="${d}" data-start="${startH}" data-rows="${endH - startH}">
+        ${list.map((e) => {
+      const { lane, lanes: n } = lanes.get(e.id);
+      const top = (toMin(e.start_time) - startH * 60) / 60;
+      const len = (toMin(e.end_time) - toMin(e.start_time)) / 60;
+      return html`<button type="button" class="cal-event ${e.status}" data-action="cal-event" data-id="${e.id}" title="${eventTitle(e)}"
+          style="top:calc(${top} * var(--hour));height:calc(${len} * var(--hour));left:calc(${lane} * 100% / ${n});width:calc(100% / ${n})">
+          <span class="t">${fmtRange(e.start_time, e.end_time)}</span><span class="w">${eventWho(e)}</span>${calChip(e.status)}</button>`;
+    })}</div>`;
+  })}
+    </div></div>`;
+}
+
+function calAgenda(days, events) {
+  const map = byDate(events);
+  return html`<div class="card cal-agenda">${days.map((d) => html`<section class="${d === today() ? 'today' : ''}">
+    <h3><a href="${calHref({ view: 'day', date: d })}">${fmtDate(d, { weekday: 'long', month: 'short', day: 'numeric' })}</a></h3>
+    ${(map[d] || []).length ? map[d].map((e) => html`<button type="button" class="cal-item ${e.status}" data-action="cal-event" data-id="${e.id}">
+      <span class="t">${fmtRange(e.start_time, e.end_time)}</span><span class="w">${eventWho(e)}</span>${calChip(e.status)}</button>`)
+    : html`<p class="muted small" style="margin:4px 0 0">Nothing scheduled</p>`}
+  </section>`)}</div>`;
+}
+
+function eventDialog(ev) {
+  const staff = isStaff();
+  const a = ev.actions;
+  const proposed = ev.origin === 'staff';
+  const mins = toMin(ev.end_time) - toMin(ev.start_time);
+  const length = `${Math.floor(mins / 60) ? `${Math.floor(mins / 60)} h` : ''}${mins % 60 ? ` ${mins % 60} min` : ''}`.trim();
+  const withdraw = staff && ev.status === 'pending' && ev.created_by === state.me.id;
+  openDialog(html`<div class="dialog-inner">
+    <div class="row" style="margin-bottom:8px">${calChip(ev.status)}${proposed ? html`<span class="chip neutral">Proposed by staff</span>` : ''}</div>
+    <h2>${ev.students.map((s) => s.name).join(', ')}</h2>
+    <div class="error" hidden></div>
+    <dl class="cal-dl">
+      <div><dt>When</dt><dd>${fmtDate(ev.date, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}<br>${fmtRange(ev.start_time, ev.end_time)} <span class="muted">(${length})</span></dd></div>
+      <div><dt>Tutor</dt><dd>${ev.tutor_name}</dd></div>
+      ${ev.notes ? html`<div><dt>Notes</dt><dd class="pre">${ev.notes}</dd></div>` : ''}
+      <div><dt>${proposed ? 'Proposed by' : 'Added by'}</dt><dd>${ev.created_by_name} · ${fmtDT(ev.created_at)}</dd></div>
+      ${ev.responded_at ? html`<div><dt>${ev.status === 'rejected' ? 'Rejected' : 'Approved'}</dt><dd>${ev.responded_by_name} · ${fmtDT(ev.responded_at)}${ev.response_note ? html`<br>“${ev.response_note}”` : ''}</dd></div>` : ''}
+      ${ev.cancelled_at ? html`<div><dt>Cancelled</dt><dd>${ev.cancelled_by_name} · ${fmtDT(ev.cancelled_at)}${ev.cancel_reason ? html`<br>“${ev.cancel_reason}”` : ''}</dd></div>` : ''}
+    </dl>
+    ${ev.status === 'pending' && !a.includes('approve') ? html`<p class="small muted" style="margin-bottom:0">Waiting for ${ev.tutor_name} to approve or reject it.</p>` : ''}
+    ${a.includes('log_hours') ? html`<div class="cal-log"><b class="small">Log hours for the monthly report</b>
+      <div class="row" style="margin-top:6px">${ev.students.map((s) => html`<button type="button" class="btn sm" data-action="cal-log" data-id="${ev.id}" data-student="${s.id}">${icon('plus')} ${s.name}</button>`)}</div></div>` : ''}
+    <div class="dialog-actions">
+      ${a.includes('cancel') ? html`<button type="button" class="btn danger" data-action="cal-cancel" data-id="${ev.id}" style="margin-right:auto">${withdraw ? 'Withdraw proposal' : 'Cancel session'}</button>` : ''}
+      <button type="button" class="btn" data-action="close">Close</button>
+      ${a.includes('edit') ? html`<button type="button" class="btn" data-action="cal-edit" data-id="${ev.id}">Edit</button>` : ''}
+      ${a.includes('reject') ? html`<button type="button" class="btn danger" data-action="cal-reject" data-id="${ev.id}">Reject</button>` : ''}
+      ${a.includes('approve') ? html`<button type="button" class="btn primary" data-action="cal-approve" data-id="${ev.id}">${icon('check')} Approve</button>` : ''}
+    </div></div>`);
+}
+
+async function eventForm(ev, defaults = {}) {
+  const staff = isStaff();
+  const isNew = !ev;
+  if (staff && !state.calTutors) state.calTutors = (await api('/api/staff/tutors')).items.filter((u) => u.role === 'tutor' && u.active);
+  const calTutor = state.cal && state.cal.tutor !== 'all' ? Number(state.cal.tutor) : null;
+  const tutorId = ev ? ev.tutor_id : staff ? (calTutor || (state.calTutors[0] && state.calTutors[0].id)) : state.me.id;
+  const v = ev || { date: defaults.date || today(), start_time: defaults.start || '16:00', end_time: defaults.end || '17:00', notes: '', students: [] };
+  openDialog(html`<form id="ev-form">
+    <h2>${isNew ? (staff ? 'Propose a session' : 'New session') : 'Edit session'}</h2>
+    <div class="error" hidden></div>
+    ${staff && isNew ? html`<label class="field"><span>Tutor</span><select class="input" name="tutor_id" required>
+      ${state.calTutors.map((t) => html`<option value="${t.id}" ${t.id === tutorId ? raw('selected') : ''}>${t.name}</option>`)}</select></label>`
+    : staff ? html`<p class="small muted" style="margin-top:0">Tutor: <b>${ev.tutor_name}</b></p><input type="hidden" name="tutor_id" value="${ev.tutor_id}">` : ''}
+    <label class="field"><span>Date</span><input class="input" type="date" name="date" value="${v.date}" ${staff ? raw(`min="${today()}"`) : ''} required></label>
+    <div class="grid-2">
+      <label class="field"><span>Start time</span><input class="input" type="time" name="start_time" value="${v.start_time}" step="900" required></label>
+      <label class="field"><span>End time</span><input class="input" type="time" name="end_time" value="${v.end_time}" step="900" required></label>
+    </div>
+    <fieldset class="field cal-students"><legend>Students</legend><div id="ev-students" class="muted small">Loading students…</div></fieldset>
+    <label class="field"><span>Notes <span class="hint">· optional</span></span><textarea class="input" name="notes" maxlength="1000" placeholder="What will you work on?">${v.notes}</textarea></label>
+    ${staff ? html`<p class="small muted">The tutor gets a notification and must approve this session before it's confirmed.</p>` : ''}
+    <div class="dialog-actions"><button type="button" class="btn" data-action="close">Cancel</button>
+      <button type="submit" class="btn primary">${isNew ? (staff ? 'Send proposal' : 'Add session') : 'Save changes'}</button></div>
+  </form>`, async (data, form) => {
+    const studentIds = [...form.querySelectorAll('input[name="student_ids"]:checked')].map((i) => Number(i.value));
+    if (!studentIds.length) throw new Error('Choose at least one student.');
+    if (!data.start_time || !data.end_time || data.end_time <= data.start_time) throw new Error('The end time must be after the start time.');
+    const body = { date: data.date, start_time: data.start_time, end_time: data.end_time, notes: data.notes, student_ids: studentIds };
+    if (staff) body.tutor_id = Number(data.tutor_id);
+    const r = isNew ? await api('/api/calendar', { method: 'POST', body }) : await api(`/api/calendar/${ev.id}`, { method: 'PUT', body });
+    closeDialog();
+    toast(!isNew ? 'Session updated.' : staff ? `Proposal sent to ${r.event.tutor_name} for approval.` : 'Session added to your calendar.');
+    if (parseHash().path === '/calendar') {
+      const tutor = staff && state.cal.tutor !== 'all' ? String(r.event.tutor_id) : state.cal.tutor;
+      go(calHref({ date: r.event.date, tutor }));
+    } else render();
+  });
+  loadEventStudents(v.students.map((s) => s.id));
+}
+
+let evStudentsReq = 0;
+async function loadEventStudents(selected = []) {
+  const form = $('#ev-form');
+  if (!form) return;
+  const tutor = form.elements.tutor_id ? form.elements.tutor_id.value : state.me.id;
+  const date = form.elements.date.value || today();
+  const keep = new Set([...selected, ...[...form.querySelectorAll('input[name="student_ids"]:checked')].map((i) => Number(i.value))]);
+  const req = ++evStudentsReq;
+  const box = $('#ev-students');
+  try {
+    const { items } = await api(`/api/calendar/students?tutor_id=${tutor}&date=${date}`);
+    if (req !== evStudentsReq || !$('#ev-form')) return;
+    box.className = '';
+    box.innerHTML = String(items.length ? html`${items.map((s) => html`<label class="check"><input type="checkbox" name="student_ids" value="${s.id}" ${keep.has(s.id) || items.length === 1 ? raw('checked') : ''}><span>${s.name}${studentChip(s.status)}</span></label>`)}`
+      : html`<span class="muted small">No students are assigned to this tutor on ${fmtDate(date)}.</span>`);
+  } catch (err) { if (req === evStudentsReq) box.textContent = err.message; }
+}
+
+dialog.addEventListener('change', (e) => {
+  if (e.target.closest('#ev-form') && ['tutor_id', 'date'].includes(e.target.name)) loadEventStudents();
+});
+
+function newEventDefaults() {
+  const c = state.cal;
+  let date = !c ? today() : c.view === 'day' ? c.date : (today() >= c.start && today() <= c.end ? today() : c.date);
+  if (isStaff() && date < today()) date = today();
+  return { date };
+}
+
+/* ---------- calendar: requests & proposals ---------- */
+async function viewRequests() {
+  const staff = isStaff();
+  const { events } = await api('/api/calendar/requests');
+  state.calEvents = new Map(events.map((e) => [e.id, e]));
+  if (!staff) {
+    state.pending = events.length;
+    renderTopbar('/calendar/requests');
+    paint(html`
+      <div class="page-head"><div><h1>Session requests</h1>
+        <p class="muted" style="margin:2px 0 0">LVAEP staff proposed these sessions for your calendar. Approve the ones that work for you.</p></div>
+        <span class="spacer"></span><a class="btn" href="#/calendar">${icon('cal')} Open calendar</a></div>
+      ${events.length ? html`<div class="cards">${events.map((e) => html`<article class="card request-card">
+        <header><div class="cal-when"><b>${fmtDate(e.date, { weekday: 'long', month: 'short', day: 'numeric' })}</b><span>${fmtRange(e.start_time, e.end_time)}</span></div>
+          <span class="spacer"></span>${calChip(e.status)}</header>
+        <div><b>${e.students.map((s) => s.name).join(', ')}</b></div>
+        ${e.notes ? html`<p class="small" style="margin:0;color:var(--ink-2)">${e.notes}</p>` : ''}
+        <div class="small muted">Proposed by ${e.created_by_name} · ${fmtDT(e.created_at)}</div>
+        <div class="actions">
+          <button class="btn primary" data-action="cal-approve" data-id="${e.id}">${icon('check')} Approve</button>
+          <button class="btn danger" data-action="cal-reject" data-id="${e.id}">Reject</button>
+          <a class="btn ghost" href="#/calendar?view=week&date=${e.date}&event=${e.id}">View</a>
+        </div></article>`)}</div>`
+    : html`<div class="card empty"><b>No requests waiting.</b><br>When LVAEP staff propose a session, it shows up here for you to approve or reject.</div>`}`);
+    return;
+  }
+  const counts = { pending: 0, confirmed: 0, rejected: 0, cancelled: 0 };
+  events.forEach((e) => { counts[e.status] += 1; });
+  paint(html`
+    <div class="page-head"><div><h1>Your proposals</h1>
+      <p class="muted" style="margin:2px 0 0">${counts.pending} waiting · ${counts.confirmed} approved · ${counts.rejected} rejected · ${counts.cancelled} cancelled or withdrawn</p></div>
+      <span class="spacer"></span><a class="btn" href="#/calendar">${icon('cal')} Calendar</a>
+      <button class="btn primary" data-action="cal-new">${icon('plus')} Propose session</button></div>
+    <div class="toolbar"><select class="input" id="rq-status" style="max-width:200px" aria-label="Filter by status"><option value="">All statuses</option>
+      ${Object.entries(CAL_STATUS).map(([k, v]) => html`<option value="${k}">${v}</option>`)}</select></div>
+    <div class="card table-wrap"><table class="data">
+      <thead><tr><th>Date</th><th>Time</th><th>Tutor</th><th>Students</th><th>Status</th><th>Tutor's response</th></tr></thead>
+      <tbody id="rq-body">${events.length ? events.map((e) => html`<tr class="clickable" tabindex="0" data-status="${e.status}"
+        data-href="#/calendar?view=week&date=${e.date}&tutor=${e.tutor_id}&event=${e.id}">
+        <td class="nowrap"><b>${fmtDate(e.date)}</b></td><td class="nowrap">${fmtRange(e.start_time, e.end_time)}</td>
+        <td>${e.tutor_name}</td><td>${e.students.map((s) => s.name).join(', ')}</td><td>${calChip(e.status)}</td>
+        <td>${e.responded_at ? html`${fmtDT(e.responded_at)}${e.response_note ? html`<div class="sub">“${e.response_note}”</div>` : ''}`
+    : e.status === 'cancelled' ? html`<span class="sub">Cancelled ${fmtDT(e.cancelled_at)}</span>` : html`<span class="muted">—</span>`}</td></tr>`)
+    : html`<tr><td colspan="6" class="empty">You haven't proposed any sessions yet.</td></tr>`}</tbody>
+    </table></div>`);
+  $('#rq-status').addEventListener('change', (e) => {
+    document.querySelectorAll('#rq-body tr[data-status]').forEach((tr) => { tr.hidden = e.target.value && tr.dataset.status !== e.target.value; });
+  });
+}
+
 /* ---------- global click actions ---------- */
 const actions = {
   close: () => closeDialog(),
@@ -973,6 +1317,60 @@ const actions = {
     const u = state.tutors.find((x) => x.id === Number(el.dataset.id));
     const r = await api(`/api/staff/tutors/${u.id}/reset-password`, { method: 'POST', body: {} });
     showTempPassword(u.name, u.email, r.temp_password, false);
+  },
+  'cal-event': (el) => eventDialog(state.calEvents.get(Number(el.dataset.id))),
+  'cal-new': () => eventForm(null, newEventDefaults()),
+  'cal-edit': (el) => eventForm(state.calEvents.get(Number(el.dataset.id))),
+  'cal-slot'(el, e) {
+    const rect = el.getBoundingClientRect();
+    const h = Math.min(23, Number(el.dataset.start) + Math.floor(((e.clientY - rect.top) / rect.height) * Number(el.dataset.rows)));
+    const pad = (n) => String(n).padStart(2, '0');
+    eventForm(null, { date: el.dataset.date, start: `${pad(h)}:00`, end: h < 23 ? `${pad(h + 1)}:00` : '23:59' });
+  },
+  async 'cal-approve'(el) {
+    const { event } = await api(`/api/calendar/${el.dataset.id}/approve`, { method: 'POST', body: {} });
+    closeDialog();
+    state.pending = Math.max(0, state.pending - 1);
+    toast(`Approved: ${fmtDate(event.date)}, ${fmtRange(event.start_time, event.end_time)}.`);
+    render();
+  },
+  'cal-reject'(el) {
+    const ev = state.calEvents.get(Number(el.dataset.id));
+    openDialog(html`<form><h2>Reject this session?</h2><div class="error" hidden></div>
+      <p class="small muted" style="margin-top:0">${ev.students.map((s) => s.name).join(', ')} · ${fmtDate(ev.date)}, ${fmtRange(ev.start_time, ev.end_time)}. ${ev.created_by_name} will be notified.</p>
+      <label class="field"><span>Reason <span class="hint">· optional</span></span><input class="input" name="note" maxlength="500" placeholder="e.g. I'm not available that day"></label>
+      <div class="dialog-actions"><button type="button" class="btn" data-action="close">Keep it</button><button type="submit" class="btn danger solid">Reject session</button></div></form>`,
+    async (data) => {
+      await api(`/api/calendar/${ev.id}/reject`, { method: 'POST', body: data });
+      closeDialog();
+      state.pending = Math.max(0, state.pending - 1);
+      toast('Session rejected.');
+      render();
+    });
+  },
+  'cal-cancel'(el) {
+    const ev = state.calEvents.get(Number(el.dataset.id));
+    const withdraw = isStaff() && ev.status === 'pending' && ev.created_by === state.me.id;
+    const notify = isStaff() ? ev.tutor_name : ev.origin === 'staff' ? ev.created_by_name : null;
+    openDialog(html`<form><h2>${withdraw ? 'Withdraw this proposal?' : 'Cancel this session?'}</h2><div class="error" hidden></div>
+      <p class="small muted" style="margin-top:0">${ev.students.map((s) => s.name).join(', ')} · ${fmtDate(ev.date)}, ${fmtRange(ev.start_time, ev.end_time)}.${notify ? ` ${notify} will be notified.` : ''} The session stays on the calendar, marked cancelled.</p>
+      <label class="field"><span>Reason <span class="hint">· optional</span></span><input class="input" name="reason" maxlength="500" placeholder="e.g. Library closed for a holiday"></label>
+      <div class="dialog-actions"><button type="button" class="btn" data-action="close">Keep it</button><button type="submit" class="btn danger solid">${withdraw ? 'Withdraw proposal' : 'Cancel session'}</button></div></form>`,
+    async (data) => {
+      await api(`/api/calendar/${ev.id}/cancel`, { method: 'POST', body: data });
+      closeDialog();
+      toast(withdraw ? 'Proposal withdrawn.' : 'Session cancelled.');
+      render();
+    });
+  },
+  async 'cal-log'(el) {
+    const ev = state.calEvents.get(Number(el.dataset.id));
+    const b = await api(`/api/reports/${ev.tutor_id}/${el.dataset.student}/${ev.date.slice(0, 7)}`);
+    if (b.report.locked) throw new Error(`${b.month_label} is already submitted for ${b.student.name}. Ask LVAEP staff to reopen it.`);
+    if (b.sessions.some((s) => s.date === ev.date)) throw new Error(`Hours for ${b.student.name} on ${fmtDate(ev.date)} are already logged. Edit them from the monthly report.`);
+    currentBundle = b;
+    const hours = Math.min(8, Math.round(((toMin(ev.end_time) - toMin(ev.start_time)) / 60) * 4) / 4);
+    sessionDialog(b, null, { date: ev.date, tutoring_hours: hours, homework_hours: 0, note: ev.notes.slice(0, 500) });
   },
 };
 

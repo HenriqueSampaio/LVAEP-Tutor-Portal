@@ -43,6 +43,9 @@ PLACES = ["Newark Public Library – Main", "Paterson Free Public Library", "LVA
 
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 TIMES = ["10:00–12:00", "1:00–3:00", "6:00–8:00 pm", "5:30–7:30 pm"]
+# The same slots as 24-hour clock times, for the calendar.
+SLOT_TIMES = {"10:00–12:00": ("10:00", "12:00"), "1:00–3:00": ("13:00", "15:00"),
+              "6:00–8:00 pm": ("18:00", "20:00"), "5:30–7:30 pm": ("17:30", "19:30")}
 
 # tutor index -> list of student indexes
 ASSIGN = {
@@ -203,6 +206,8 @@ def seed(conn):
             """UPDATE reports SET status = 'draft', returned = 1, reviewed_at = NULL, reviewed_by = NULL, staff_note = ?
                WHERE tutor_id = ? AND student_id = ? AND month = ?""", (returned_note, tutor_id, student_id, prev_month))
 
+    seed_calendar(conn, today, holidays, tutor_ids, staff_ids, paused)
+
     for uid in tutor_ids:
         db.notify(conn, uid, "welcome",
                   "Welcome to LVAEP tutor reporting! Log each session here and submit each month when you're done.")
@@ -212,3 +217,97 @@ def seed(conn):
               link=f"#/tutor/student/{student_ids[2]}?month={prev_month}")
     db.audit(conn, staff_ids[0], "seed", "Loaded synthetic demo data")
     conn.commit()
+
+
+def _add_event(conn, tutor_id, date, start, end, students, created_by, status="confirmed", origin="tutor", notes="",
+               **extra):
+    cols = {"tutor_id": tutor_id, "date": date.isoformat(), "start_time": start, "end_time": end, "status": status,
+            "origin": origin, "notes": notes, "created_by": created_by, **extra}
+    cur = conn.execute(f"INSERT INTO calendar_events ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                       list(cols.values()))
+    conn.executemany("INSERT INTO calendar_event_students (event_id, student_id) VALUES (?, ?)",
+                     [(cur.lastrowid, sid) for sid in students])
+    return cur.lastrowid
+
+
+def _free_slot(conn, tutor_id, date, length_min, hours=(11, 14, 16, 10, 9, 15)):
+    for h in hours:
+        start, end = f"{h:02d}:00", f"{h + length_min // 60:02d}:{length_min % 60:02d}"
+        if not db.confirmed_overlap(conn, tutor_id, date.isoformat(), start, end):
+            return start, end
+    return None
+
+
+def seed_calendar(conn, today, holidays, tutor_ids, staff_ids, paused):
+    """Scheduled sessions: each pair's weekly slot from three weeks back to four weeks ahead, plus a few
+    staff proposals for Maria and James in every approval state."""
+    rng = random.Random(7)  # separate from seed()'s generator so the rest of the demo data is unchanged
+    first_day, last_day = today - dt.timedelta(days=21), today + dt.timedelta(days=28)
+    rows = conn.execute(
+        "SELECT tutor_id, student_id, schedule, start_date, end_date FROM assignments ORDER BY tutor_id, id").fetchall()
+    for r in rows:
+        day_name, slot = (x.strip() for x in r["schedule"].split(",", 1))
+        start, end = SLOT_TIMES[slot]
+        weekday = DAYS.index(day_name[:-1])
+        d = max(first_day, dt.date.fromisoformat(r["start_date"]))
+        d += dt.timedelta(days=(weekday - d.weekday()) % 7)
+        stop = min(last_day, dt.date.fromisoformat(r["end_date"])) if r["end_date"] else last_day
+        while d <= stop:
+            if d not in holidays and not (r["student_id"] == paused and d >= today - dt.timedelta(days=24)):
+                same = conn.execute(
+                    """SELECT id FROM calendar_events WHERE tutor_id = ? AND date = ? AND start_time = ? AND end_time = ?
+                       AND status = 'confirmed'""", (r["tutor_id"], d.isoformat(), start, end)).fetchone()
+                if same:  # two students in the same slot meet together
+                    conn.execute("INSERT INTO calendar_event_students (event_id, student_id) VALUES (?, ?)",
+                                 (same["id"], r["student_id"]))
+                elif not db.confirmed_overlap(conn, r["tutor_id"], d.isoformat(), start, end):
+                    note = rng.choice(["", "", "", "Bring the graded reader", "Practice for the citizenship interview",
+                                       "Job application follow-up"])
+                    _add_event(conn, r["tutor_id"], d, start, end, [r["student_id"]], r["tutor_id"], notes=note)
+            d += dt.timedelta(days=7)
+
+    maria, james = tutor_ids[0], tutor_ids[1]
+    dana = staff_ids[0]
+    proposed_at = f"{today - dt.timedelta(days=1)} 10:15:00"
+
+    def students_of(tutor_id):
+        return [r["student_id"] for r in conn.execute(
+            "SELECT student_id FROM assignments WHERE tutor_id = ? AND end_date IS NULL ORDER BY id", (tutor_id,))]
+
+    maria_students, james_students = students_of(maria), students_of(james)
+    proposals = [
+        (maria, today + dt.timedelta(days=2), 90, maria_students[:1], "Extra session before the library's reading fair"),
+        (maria, today + dt.timedelta(days=9), 60, maria_students[1:3], "Small-group conversation practice"),
+        (james, today + dt.timedelta(days=4), 90, james_students[:1], "Make-up session for the missed holiday"),
+    ]
+    for tutor_id, date, length, students, notes in proposals:
+        slot = _free_slot(conn, tutor_id, date, length)
+        if slot:
+            _add_event(conn, tutor_id, date, *slot, students, dana, status="pending", origin="staff", notes=notes,
+                       created_at=proposed_at)
+            label = ", ".join(r["n"] for r in conn.execute(
+                f"""SELECT first_name || ' ' || last_name AS n FROM students
+                    WHERE id IN ({','.join('?' * len(students))})""", students))
+            db.notify(conn, tutor_id, "calendar",
+                      f"Dana Whitfield proposed a session: {label} on {date:%a %b} {date.day}. Please approve or reject it.",
+                      link=f"#/calendar?view=week&date={date.isoformat()}")
+
+    date = today + dt.timedelta(days=5)
+    slot = _free_slot(conn, maria, date, 60, hours=(9, 10, 11))
+    if slot:
+        _add_event(conn, maria, date, *slot, maria_students[:1], dana, status="rejected", origin="staff",
+                   notes="Morning slot at the Bloomfield office", created_at=proposed_at, responded_by=maria,
+                   responded_at=f"{today} 08:40:00", response_note="I work mornings that week, sorry!")
+    date = today + dt.timedelta(days=12)
+    slot = _free_slot(conn, maria, date, 60, hours=(13, 14, 15))
+    if slot:
+        _add_event(conn, maria, date, *slot, maria_students[:1], dana, status="confirmed", origin="staff",
+                   notes="Placement test practice", created_at=proposed_at, responded_by=maria,
+                   responded_at=f"{today} 08:45:00")
+    later = conn.execute(
+        """SELECT id FROM calendar_events WHERE tutor_id = ? AND status = 'confirmed' AND origin = 'tutor' AND date > ?
+           ORDER BY date LIMIT 1""", (maria, (today + dt.timedelta(days=7)).isoformat())).fetchone()
+    if later:
+        conn.execute("""UPDATE calendar_events SET status = 'cancelled', cancelled_by = ?, cancelled_at = ?,
+                        cancel_reason = 'Student is traveling that week' WHERE id = ?""",
+                     (maria, f"{today} 09:00:00", later["id"]))

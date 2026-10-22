@@ -135,7 +135,32 @@ CREATE TABLE IF NOT EXISTS audit_log (
     detail TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
+CREATE TABLE IF NOT EXISTS calendar_events (
+    id INTEGER PRIMARY KEY,
+    tutor_id INTEGER NOT NULL REFERENCES users(id),
+    date TEXT NOT NULL,
+    start_time TEXT NOT NULL,
+    end_time TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'confirmed', 'rejected', 'cancelled')),
+    origin TEXT NOT NULL CHECK (origin IN ('tutor', 'staff')),
+    notes TEXT NOT NULL DEFAULT '',
+    created_by INTEGER NOT NULL REFERENCES users(id),
+    responded_by INTEGER REFERENCES users(id),
+    responded_at TEXT,
+    response_note TEXT NOT NULL DEFAULT '',
+    cancelled_by INTEGER REFERENCES users(id),
+    cancelled_at TEXT,
+    cancel_reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE TABLE IF NOT EXISTS calendar_event_students (
+    event_id INTEGER NOT NULL REFERENCES calendar_events(id) ON DELETE CASCADE,
+    student_id INTEGER NOT NULL REFERENCES students(id),
+    PRIMARY KEY (event_id, student_id)
+);
 CREATE INDEX IF NOT EXISTS idx_sessions_pair ON sessions (tutor_id, student_id, date);
+CREATE INDEX IF NOT EXISTS idx_cal_tutor_date ON calendar_events (tutor_id, date);
 CREATE INDEX IF NOT EXISTS idx_assign_tutor ON assignments (tutor_id);
 CREATE INDEX IF NOT EXISTS idx_assign_student ON assignments (student_id);
 """
@@ -275,6 +300,15 @@ def tutor_has_student(conn, tutor_id, student_id):
     ).fetchone() is not None
 
 
+def assignment_covers(conn, tutor_id, student_id, date):
+    """True if the tutor is assigned to the student on `date` (YYYY-MM-DD)."""
+    return conn.execute(
+        """SELECT 1 FROM assignments WHERE tutor_id = ? AND student_id = ? AND start_date <= ?
+           AND (end_date IS NULL OR end_date >= ?)""",
+        (tutor_id, student_id, date, date),
+    ).fetchone() is not None
+
+
 def assignment_for(conn, tutor_id, student_id, month=None):
     rows = conn.execute(
         "SELECT * FROM assignments WHERE tutor_id = ? AND student_id = ? ORDER BY start_date DESC",
@@ -403,3 +437,62 @@ def report_bundle(conn, tutor_id, student_id, month):
         },
         "month_closed": last < today(),
     }
+
+
+# ---------- calendar ----------
+
+CALENDAR_STATUSES = ("pending", "confirmed", "rejected", "cancelled")
+
+_EVENT_SQL = """
+    SELECT e.*, t.name AS tutor_name, c.name AS created_by_name, c.role AS created_by_role,
+           r.name AS responded_by_name, x.name AS cancelled_by_name
+    FROM calendar_events e
+    JOIN users t ON t.id = e.tutor_id
+    JOIN users c ON c.id = e.created_by
+    LEFT JOIN users r ON r.id = e.responded_by
+    LEFT JOIN users x ON x.id = e.cancelled_by
+"""
+
+
+def _with_students(conn, rows):
+    events = [dict(r) for r in rows]
+    if not events:
+        return events
+    ids = [e["id"] for e in events]
+    students = {}
+    for s in conn.execute(
+        f"""SELECT es.event_id, s.id, s.first_name || ' ' || s.last_name AS name
+            FROM calendar_event_students es JOIN students s ON s.id = es.student_id
+            WHERE es.event_id IN ({','.join('?' * len(ids))}) ORDER BY s.last_name, s.first_name""", ids):
+        students.setdefault(s["event_id"], []).append({"id": s["id"], "name": s["name"]})
+    for e in events:
+        e["students"] = students.get(e["id"], [])
+    return events
+
+
+def calendar_event(conn, event_id):
+    row = conn.execute(_EVENT_SQL + " WHERE e.id = ?", (event_id,)).fetchone()
+    return _with_students(conn, [row])[0] if row else None
+
+
+def calendar_events(conn, tutor_id=None, start=None, end=None, status=None, created_by=None, newest_first=False):
+    """Calendar events matching the given filters (dates are YYYY-MM-DD; None means no filter)."""
+    where, args = ["1 = 1"], []
+    for clause, value in (("e.tutor_id = ?", tutor_id), ("e.date >= ?", start), ("e.date <= ?", end),
+                          ("e.status = ?", status), ("e.created_by = ?", created_by)):
+        if value is not None:
+            where.append(clause)
+            args.append(value)
+    order = "e.created_at DESC, e.id DESC LIMIT 300" if newest_first else "e.date, e.start_time, e.id"
+    rows = conn.execute(f"{_EVENT_SQL} WHERE {' AND '.join(where)} ORDER BY {order}", args).fetchall()
+    return _with_students(conn, rows)
+
+
+def confirmed_overlap(conn, tutor_id, date, start_time, end_time, exclude_id=0):
+    """The first confirmed event on the tutor's calendar that overlaps the given time range, if any."""
+    row = conn.execute(
+        """SELECT id FROM calendar_events WHERE tutor_id = ? AND date = ? AND status = 'confirmed'
+           AND start_time < ? AND end_time > ? AND id != ? ORDER BY start_time LIMIT 1""",
+        (tutor_id, date, end_time, start_time, exclude_id),
+    ).fetchone()
+    return calendar_event(conn, row["id"]) if row else None
