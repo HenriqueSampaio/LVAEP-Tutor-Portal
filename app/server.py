@@ -169,6 +169,7 @@ def change_password(ctx):
 @route("GET", "/api/meta", auth=False)
 def meta(ctx):
     return {"attendance": db.ATTENDANCE_CODES, "achievements": db.ACHIEVEMENTS,
+            "achievement_groups": [{"heading": h, "items": items} for h, items in db.ACHIEVEMENT_GROUPS],
             "today": db.today().isoformat(), "weekly_target": db.WEEKLY_TARGET_HOURS}
 
 
@@ -248,9 +249,10 @@ def report_save(ctx):
         parse_date(leaving_date, "leaving_date")
     db.ensure_report(ctx.conn, tutor_id, student_id, month)
     ctx.conn.execute(
-        """UPDATE reports SET achievements = ?, achievement_notes = ?, leaving_date = ?, leaving_reason = ?
-           WHERE tutor_id = ? AND student_id = ? AND month = ?""",
-        (json.dumps(achievements), (b.get("achievement_notes") or "")[:2000], leaving_date,
+        """UPDATE reports SET achievements = ?, achievement_notes = ?, achievement_other = ?, leaving_date = ?,
+           leaving_reason = ? WHERE tutor_id = ? AND student_id = ? AND month = ?""",
+        (json.dumps(achievements), (b.get("achievement_notes") or "")[:2000], (b.get("achievement_other") or "")[:300],
+         leaving_date,
          (b.get("leaving_reason") or "")[:500], tutor_id, student_id, month))
     if ctx.is_staff:
         t, s = names(ctx.conn, tutor_id, student_id)
@@ -982,6 +984,8 @@ def print_forms(ctx):
     if ctx.q("tutor") and ctx.q("student"):
         tutor_id, student_id = int(ctx.q("tutor")), int(ctx.q("student"))
         check_pair_access(ctx, tutor_id, student_id)
+        if ctx.q("fragment") == "1":  # just the form, for the app's built-in print (button / Cmd+P)
+            return Raw(exports.attendance_form(ctx.conn, tutor_id, student_id, month), "text/html; charset=utf-8")
         t, s = names(ctx.conn, tutor_id, student_id)
         html = exports.printable(ctx.conn, [(tutor_id, student_id)], month, f"{s} — {label}")
     elif ctx.is_staff:

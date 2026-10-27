@@ -206,6 +206,12 @@ def seed(conn):
             """UPDATE reports SET status = 'draft', returned = 1, reviewed_at = NULL, reviewed_by = NULL, staff_note = ?
                WHERE tutor_id = ? AND student_id = ? AND month = ?""", (returned_note, tutor_id, student_id, prev_month))
 
+    # "E. Other(s)" goals on a couple of Maria's reports, so the printed form shows that line filled in.
+    for student_idx, month, other in ((0, db.fiscal_months(this_month)[1], "Passed the DMV written test"),
+                                      (1, prev_month, "Opened a savings account")):
+        conn.execute("UPDATE reports SET achievement_other = ? WHERE tutor_id = ? AND student_id = ? AND month = ?",
+                     (other, maria, student_ids[student_idx], month))
+
     seed_calendar(conn, today, holidays, tutor_ids, staff_ids, paused)
 
     for uid in tutor_ids:

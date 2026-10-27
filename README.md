@@ -15,7 +15,7 @@ python3 server.py            # http://localhost:8070 — loads demo data on firs
 python3 server.py --reset    # wipe and reload the demo data
 python3 server.py --reset --empty   # empty system with one admin (admin@lvaep.example / demo1234)
 python3 server.py --host 0.0.0.0    # open it from a phone on the same Wi-Fi
-python3 -m unittest discover -s tests -t . -v   # acceptance + calendar tests (24)
+python3 -m unittest discover -s tests -t . -v   # acceptance, calendar and print tests (30)
 ```
 
 Demo accounts (password `demo1234`): **dana@lvaep.example** (staff), **maria@tutors.example** and **james@tutors.example** (tutors). The login page has one-click buttons for them.
@@ -28,7 +28,7 @@ Set `LVAEP_TODAY=2026-10-31` to pretend it's another day (e.g. to see the last-d
 2. Open **Fatima Haddad → September**. Staff returned it because one session says 4 h tutoring + 0 h homework. Tap **Edit**, set 2 + 2, save, **Submit September**. The month locks.
 3. Back on October, tap **Log session** on any card: date, attendance (present / student absent / tutor absent / holiday / cancelled), tutoring and homework hours, a note.
 4. **Staff (Dana).** *Monthly reports* → September: status counts, completion bar, filter by status, search. Fatima's report is now *Submitted* → open it → **Mark reviewed** or **Return to tutor** with a note.
-5. **Print submitted forms** gives one form per student in the current form's layout (with fiscal-year totals by month) → Print → Save as PDF. **Summary CSV** / **Sessions CSV** give spreadsheets.
+5. **Print submitted forms** gives LVAEP's *Student Monthly Attendance & Achievement Form*, one per student (days × months grid for the fiscal year, goals attained, STOPPED, site/days/times) → Print → Save as PDF. On any student's report, tutors and staff can print that student's form with **Print form** or **⌘P / Ctrl+P**. **Summary CSV** / **Sessions CSV** give spreadsheets.
 6. **Remind N tutors** notifies everyone with a missing report. *Reminders* shows the automatic schedule and history.
 7. *Students* → open **Hyun Park** (dropped in August) to see that a drop is permanent and only staff can readmit. Open any active student to **Assign a tutor** (warns if the tutor has under 10 training hours or already has 5 students).
 8. *Tutors & accounts* → **Create account**: staff get a temporary password; the tutor must choose their own at first sign-in.
@@ -44,7 +44,7 @@ Set `LVAEP_TODAY=2026-10-31` to pretend it's another day (e.g. to see the last-d
 | Staff see the correct total; another tutor cannot see the student (PRD acceptance) | Staff overview totals; every API call checks the tutor–student assignment (tests 01–02) |
 | Staff assign students and review/correct (PRD F1) | Assignments, review, return-with-note, staff edits (audited) |
 | Export fields: names, meeting place, days/times, dates/hours, achievements, reason/date for leaving (PRD F1) | Printable form + 2 CSVs |
-| “Make export look like the current format”; form totals the whole fiscal year (meeting) | Form-style printout with FY month-by-month table |
+| “Make export look like the current format”; form totals the whole fiscal year (meeting) | The official form, landscape on one page: each day's hours (or TA / SA / H) by fiscal-year month, monthly totals, official goals |
 | Reminders on the last day of the month, maybe weekly (meeting) | Last day of month, overdue on the 3rd, optional weekly; manual send |
 | Admin creates tutor accounts (meeting) | Accounts with temp password + forced change; deactivate; reset |
 | Drop is permanent; readmission is admin-only (meeting) | Drop ends all assignments; readmit needs explicit confirmation |
@@ -59,7 +59,8 @@ Set `LVAEP_TODAY=2026-10-31` to pretend it's another day (e.g. to see the last-d
 - **Report granularity:** one monthly report per *tutor–student pair* (a student with two tutors gets two reports).
 - **Review vs. approval:** staff *review*. They can mark a report reviewed, return it to the tutor with a note, or correct it themselves (logged).
 - **Correction window:** tutors edit freely until they submit; after that only staff can change or reopen it.
-- **Achievements:** a **placeholder** checklist plus free-text notes. Replace it with the real form fields in `app/db.py` → `ACHIEVEMENTS`.
+- **Achievements:** the official form's goals (A–D, `app/db.py` → `ACHIEVEMENT_GROUPS`) plus an “E. Other(s)” line and free-text notes, checked per month. The printed form ticks every goal attained so far in the fiscal year.
+- **Printed hours:** each day's box shows tutoring + homework hours. A *cancelled* entry is left blank (the form has no code for it).
 - **Leaving:** the tutor reports date + reason, and staff are notified. Only staff change the student's status (pause or permanent drop).
 - **Notifications:** shown in the app only. Each one is stored with `email_status`, so email can be added once LVAEP picks a provider.
 - **Month cutoff:** the current month can be submitted early (with a warning); future months cannot.
@@ -73,11 +74,12 @@ server.py              entry point (flags above)
 app/db.py              schema, domain rules, report bundle (totals, FY breakdown), calendar queries
 app/server.py          HTTP server + JSON API, role/assignment access checks, /api/calendar routes
 app/reminders.py       month-end / overdue / weekly reminder rules (run every 30 min, idempotent)
-app/exports.py         CSV exports and the printable monthly form
+app/exports.py         CSV exports and the official attendance & achievement form
 app/seed.py            synthetic demo data, generated relative to today
-static/                single-page app (vanilla JS, no build step)
+static/                single-page app (vanilla JS, no build step); print-form.css styles the printed form
 tests/test_acceptance.py  end-to-end API tests
 tests/test_calendar.py    calendar scheduling, approval and permission tests
+tests/test_print.py       the printed form's grid, goals, STOPPED box and access
 data/lvaep.sqlite3     created on first run (gitignore it)
 ```
 

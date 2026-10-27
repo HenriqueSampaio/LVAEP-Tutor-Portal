@@ -6,7 +6,7 @@ const app = $('#app');
 const topbar = $('#topbar');
 const dialog = $('#dialog');
 const state = { me: null, unread: 0, pending: 0, meta: null, overview: null, ovFilter: 'all', ovSearch: '',
-  cal: null, calEvents: new Map(), calTutors: null, calTutor: null, calShowRejected: false };
+  cal: null, calEvents: new Map(), calTutors: null, calTutor: null, calShowRejected: false, sheet: null };
 
 /* ---------- safe HTML templating: every interpolation is escaped unless wrapped in raw() ---------- */
 class Safe { constructor(s) { this.s = s; } toString() { return this.s; } }
@@ -137,6 +137,7 @@ window.addEventListener('hashchange', render);
 async function render() {
   closeNotif();
   if (dialog.open) closeDialog();
+  clearPrintSheet();
   const { path, q } = parseHash();
   try {
     if (!state.meta) state.meta = await api('/api/meta');
@@ -419,12 +420,16 @@ async function viewReport(tutorId, studentId, month) {
     </section>
 
     <form id="report-form" class="stack" style="margin-top:16px">
-      <details class="card panel" ${r.achievements.length || r.achievement_notes ? raw('open') : ''}>
-        <summary>Achievements this month <span class="muted small" style="font-weight:400">${r.achievements.length ? `· ${r.achievements.length} selected` : '· optional'}</span><span class="spacer"></span><span class="small muted save-state" aria-live="polite"></span></summary>
+      <details class="card panel" ${r.achievements.length || r.achievement_other || r.achievement_notes ? raw('open') : ''}>
+        <summary>Achievements this month <span class="muted small" style="font-weight:400">${r.achievements.length + (r.achievement_other ? 1 : 0) ? `· ${r.achievements.length + (r.achievement_other ? 1 : 0)} selected` : '· optional'}</span><span class="spacer"></span><span class="small muted save-state" aria-live="polite"></span></summary>
         <div class="panel-body">
-          <p class="small muted" style="margin-top:0">Check anything the student accomplished this month. <i>(Placeholder list — the final fields will match LVAEP's form.)</i></p>
-          ${state.meta.achievements.map((x) => html`<label class="check"><input type="checkbox" name="achievement" value="${x}" ${achieved.has(x) ? raw('checked') : ''} ${dis}><span>${x}</span></label>`)}
-          ${extras.map((x) => html`<label class="check"><input type="checkbox" name="achievement" value="${x}" checked ${dis}><span>${x}</span></label>`)}
+          <p class="small muted" style="margin-top:0">Check each goal the student attained this month. The printed form ticks every goal attained so far this fiscal year.</p>
+          ${state.meta.achievement_groups.map((g) => html`<fieldset class="goal-group"><legend>${g.heading}</legend>
+            ${g.items.map((x) => html`<label class="check"><input type="checkbox" name="achievement" value="${x}" ${achieved.has(x) ? raw('checked') : ''} ${dis}><span>${x}</span></label>`)}</fieldset>`)}
+          ${extras.length ? html`<fieldset class="goal-group"><legend>From the earlier checklist</legend>
+            ${extras.map((x) => html`<label class="check"><input type="checkbox" name="achievement" value="${x}" checked ${dis}><span>${x}</span></label>`)}</fieldset>` : ''}
+          <label class="field"><span>E. Other(s) <span class="hint">· optional</span></span>
+            <input class="input" name="achievement_other" value="${r.achievement_other}" maxlength="300" ${dis} placeholder="Another goal the student reached"></label>
           <label class="field" style="margin-top:10px"><span>Notes on progress <span class="hint">· optional</span></span>
             <textarea class="input" name="achievement_notes" rows="3" ${dis} placeholder="e.g. Read her first full chapter book">${r.achievement_notes}</textarea></label>
         </div>
@@ -451,7 +456,7 @@ async function viewReport(tutorId, studentId, month) {
 
     <div class="submit-bar">
       <div class="summary"><b>${monthLabel(month)}</b> · ${t.attended} session${t.attended === 1 ? '' : 's'} attended · <b>${fmtH(t.total)} h</b> (${fmtH(t.tutoring)} tutoring + ${fmtH(t.homework)} homework)</div>
-      <a class="btn" href="/print?month=${month}&tutor=${tutorId}&student=${studentId}" target="_blank" rel="noopener">${icon('print')} ${staff ? 'Form / PDF' : 'Print copy'}</a>
+      <button class="btn" data-action="print-sheet" title="Print LVAEP's attendance & achievement form (${navigator.platform.startsWith('Mac') ? '⌘P' : 'Ctrl+P'})">${icon('print')} Print form</button>
       ${reportActions(b, staff)}
     </div>
   `, true);
@@ -460,6 +465,34 @@ async function viewReport(tutorId, studentId, month) {
     const form = $('#report-form');
     form.addEventListener('change', () => saveReportForm(form));
   }
+  loadPrintSheet(tutorId, studentId, month);
+}
+
+/* ---------- printing the official form (button, Cmd/Ctrl+P, or the browser's own Print) ---------- */
+function loadPrintSheet(tutorId, studentId, month) {
+  const sheet = { tutorId, studentId, month };
+  sheet.ready = fetch(`/print?tutor=${tutorId}&student=${studentId}&month=${month}&fragment=1`)
+    .then((res) => (res.ok ? res.text() : Promise.reject(new Error("Couldn't prepare the printable form."))))
+    .then((markup) => {
+      if (state.sheet !== sheet) return; // the user has moved on to another page
+      $('#print-sheet').innerHTML = markup; // server-rendered and escaped (app/exports.py)
+      document.body.classList.add('has-sheet');
+    });
+  sheet.ready.catch(() => {});
+  state.sheet = sheet;
+}
+
+function clearPrintSheet() {
+  state.sheet = null;
+  document.body.classList.remove('has-sheet');
+  $('#print-sheet').innerHTML = '';
+}
+
+async function printSheet() {
+  const sheet = state.sheet;
+  if (!sheet) return;
+  await sheet.ready;
+  if (state.sheet === sheet) window.print();
 }
 
 function reportActions(b, staff) {
@@ -497,9 +530,10 @@ function saveReportForm(form) {
       await api(`/api/reports/${b.tutor.id}/${b.student.id}/${b.month}`, {
         method: 'PUT',
         body: { achievements: fd.getAll('achievement'), achievement_notes: fd.get('achievement_notes'),
-          leaving_date: fd.get('leaving_date'), leaving_reason: fd.get('leaving_reason') },
+          achievement_other: fd.get('achievement_other'), leaving_date: fd.get('leaving_date'), leaving_reason: fd.get('leaving_reason') },
       });
       if (label) label.textContent = 'Saved ✓';
+      if (state.sheet) loadPrintSheet(b.tutor.id, b.student.id, b.month);
     } catch (err) { if (label) label.textContent = ''; toast(err.message, 'error'); }
   }, 400);
 }
@@ -1318,6 +1352,7 @@ const actions = {
     const r = await api(`/api/staff/tutors/${u.id}/reset-password`, { method: 'POST', body: {} });
     showTempPassword(u.name, u.email, r.temp_password, false);
   },
+  'print-sheet': () => printSheet(),
   'cal-event': (el) => eventDialog(state.calEvents.get(Number(el.dataset.id))),
   'cal-new': () => eventForm(null, newEventDefaults()),
   'cal-edit': (el) => eventForm(state.calEvents.get(Number(el.dataset.id))),
@@ -1386,6 +1421,11 @@ document.addEventListener('click', async (e) => {
   if (!e.target.closest('.notif-panel') && !e.target.closest('[data-action="notif"]')) closeNotif();
 });
 document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'p' && state.sheet) {
+    e.preventDefault(); // print the student's form, not the screen
+    printSheet().catch((err) => toast(err.message, 'error'));
+    return;
+  }
   const row = e.target.closest && e.target.closest('tr[data-href]');
   if (row && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); location.hash = row.dataset.href; }
 });

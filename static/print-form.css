@@ -1,0 +1,58 @@
+/* LVAEP "Student Monthly Attendance & Achievement Form" — one US-letter landscape page per form.
+   Used by the app's built-in print (button / Cmd+P) and by the standalone /print page. */
+
+@page lvform { size: letter landscape; margin: .35in; }
+
+.lv-form { page: lvform; break-after: page; width: 10.3in; color: #000; font: 8.5pt/1.25 "Times New Roman", Times, serif;
+  -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.lv-form:last-child { break-after: auto; }
+.lv-form * { box-sizing: border-box; }
+.lv-form p { margin: 0; }
+
+.lv-form .frame { display: grid; grid-template-columns: 1fr 3.45in; border: 1.5px solid #000; }
+.lv-form .title, .lv-form .att-head { border-right: 1px solid #000; border-bottom: 1px solid #000; }
+.lv-form .contact, .lv-form .ach-head { border-bottom: 1px solid #000; }
+
+.lv-form .title { padding: 5pt 8pt 7pt; text-align: center; }
+.lv-form .org { font-weight: bold; font-size: 9pt; }
+.lv-form .names { display: flex; align-items: baseline; justify-content: center; gap: 6pt; margin-top: 9pt; font-size: 9.5pt; }
+.lv-form .names u { display: inline-block; min-width: 2.1in; margin-right: 24pt; padding: 0 4pt; border-bottom: 1px solid #000; text-align: left; text-decoration: none; }
+.lv-form .contact { display: flex; flex-direction: column; justify-content: center; padding: 4pt; text-align: center; }
+.lv-form .contact i { display: block; }
+
+.lv-form .att-head, .lv-form .ach-head { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 4pt 6pt; text-align: center; }
+.lv-form .att-head b, .lv-form .ach-head b { font-size: 9.5pt; margin-bottom: 4pt; }
+.lv-form .att-head i, .lv-form .ach-head i { font-size: 9.5pt; }
+.lv-form .att-head small { margin-top: 2pt; font-size: 7pt; font-style: italic; }
+
+.lv-form .grid { width: 100%; border-collapse: collapse; border-style: hidden; table-layout: fixed; }
+.lv-form .grid th, .lv-form .grid td { height: .158in; padding: 0 2pt; border: 1px solid #000; font-size: 7.5pt; text-align: center; white-space: nowrap; overflow: hidden; }
+.lv-form .grid thead th { font-weight: bold; }
+.lv-form .grid tbody th, .lv-form .grid tfoot th { width: .4in; text-align: left; font-weight: bold; }
+.lv-form .grid td.na { background: #d6d6d6; }
+.lv-form .grid tfoot td, .lv-form .grid tfoot th { font-weight: bold; border-top-width: 1.5px; }
+
+.lv-form .goals { display: flex; flex-direction: column; gap: 5pt; padding: 4pt 7pt; border-left: 1px solid #000; }
+.lv-form .goal-group > b { text-decoration: underline; }
+.lv-form .goal-group ol { margin: 1pt 0 0; padding: 0; list-style: none; counter-reset: goal; }
+.lv-form .goal-group li { display: flex; align-items: center; gap: 4pt; padding-left: 6pt; counter-increment: goal; }
+.lv-form .goal-group li::before { content: counter(goal) "."; }
+.lv-form .goal-group li span:not(.box) { flex: 1; }
+.lv-form .box { display: inline-grid; place-items: center; flex: none; width: 9pt; height: 9pt; border: 1px solid #000; font-size: 8pt; line-height: 1; }
+.lv-form .fill { display: inline-block; min-width: 1.6in; border-bottom: 1px solid #000; }
+.lv-form .stopped { margin-top: auto; }
+.lv-form .stopped > b { display: block; text-align: center; text-decoration: underline; }
+.lv-form .stopped p { display: flex; gap: 4pt; align-items: flex-start; margin-top: 2pt; }
+.lv-form .stopped .fill { flex: 1; min-width: 0; }
+
+.lv-form .site { grid-column: 1 / -1; display: flex; gap: 12pt; padding: 2pt 6pt; border-top: 1px solid #000; }
+.lv-form .site span:first-child { flex: 2; }
+.lv-form .site span { flex: 1; }
+.lv-form .note { margin-top: 6pt; font-size: 7.5pt; font-weight: bold; text-align: center; }
+.lv-form .stamp { margin-top: 3pt; font: 6.5pt system-ui, sans-serif; color: #555; text-align: right; }
+
+/* Standalone /print page: show each form as a sheet of paper on screen. */
+.print-page .lv-form { margin: 20px auto; padding: .35in; background: #fff; box-shadow: 0 2px 10px rgba(0, 0, 0, .15); }
+@media print {
+  .print-page .lv-form { margin: 0; padding: 0; box-shadow: none; }
+}

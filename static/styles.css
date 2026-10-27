@@ -203,6 +203,9 @@ details.panel > summary::-webkit-details-marker { display: none; }
 details.panel > summary::after { content: "›"; margin-left: auto; font-size: 1.4rem; line-height: 1; color: var(--ink-3); transition: transform .15s; }
 details.panel[open] > summary::after { transform: rotate(90deg); }
 details.panel .panel-body { padding: 0 16px 16px; }
+.panel-body fieldset.goal-group { border: 0; margin: 0 0 8px; padding: 0; min-width: 0; }
+.panel-body fieldset.goal-group legend { padding: 0; font-weight: 600; font-size: .9rem; color: var(--ink-2); }
+.panel-body fieldset.goal-group .check { padding: 5px 0; }
 
 .submit-bar { position: sticky; bottom: 0; margin: 20px -16px -96px; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); background: rgba(255,255,255,.96); backdrop-filter: blur(6px); border-top: 1px solid var(--line); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; z-index: 5; }
 .submit-bar .summary { flex: 1; min-width: 180px; font-size: .9rem; color: var(--ink-2); }
@@ -385,3 +388,13 @@ fieldset.cal-students .check { padding: 5px 0; }
 .switch { display: flex; align-items: flex-start; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--line-2); }
 .switch:last-of-type { border-bottom: 0; }
 .switch input { width: 20px; height: 20px; margin-top: 3px; accent-color: var(--brand); flex: none; }
+
+/* ---------- printing a student's form ---------- */
+/* On a student's report the official form is preloaded into #print-sheet; printing (button, Cmd+P or the
+   browser menu) then shows only that form. Other pages print as they look. */
+#print-sheet { display: none; }
+@media print {
+  body.has-sheet { background: #fff; }
+  body.has-sheet > :not(#print-sheet) { display: none !important; }
+  body.has-sheet #print-sheet { display: block; }
+}

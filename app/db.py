@@ -18,20 +18,18 @@ ATTENDANCE_CODES = {
     "cancelled": "Cancelled",
 }
 
-# Placeholder list — the client's form defines the real achievement fields (PRD open decision).
-ACHIEVEMENTS = [
-    "Read a book, newspaper or article independently",
-    "Wrote a letter, email or text message",
-    "Filled out a form or application",
-    "Got a library card",
-    "Read to a child / helped with homework",
-    "Used a computer, phone or the internet for a new task",
-    "Got a job or a better job",
-    "Passed a test (citizenship, driver's, HSE, etc.)",
-    "Opened a bank account / managed a budget",
-    "Registered to vote / voted",
-    "Spoke with a doctor, teacher or landlord without help",
+# The goals on LVAEP's "Student Monthly Attendance & Achievement Form", worded exactly as printed there.
+ACHIEVEMENT_GROUPS = [
+    ("A. Economic", ["*Enter Employment", "*Retain Employment", "Leave public assistance"]),
+    ("B. Educational", ["Achieve work-based project learner goal", "*Enter Occupational Skills Training Program",
+                        "*Enter Postsecondary Education", "*Obtain High School Diploma"]),
+    ("C. Family", ["Help more frequently with school", "Increase contact with child(ren)'s teachers",
+                   "More involvement in child(ren)'s school activities", "Purchase books or magazines",
+                   "Read to child(ren)", "Visit the library (with/for child(ren))"]),
+    ("D. Societal/Community", ["*Obtain citizenship", "Achieve civics skills",
+                               "Increase involvement in community activities", "Vote or register to vote"]),
 ]
+ACHIEVEMENTS = [item for _, items in ACHIEVEMENT_GROUPS for item in items]
 
 WEEKLY_TARGET_HOURS = 4.0  # 2 h tutoring + 2 h homework per week (client meeting notes)
 
@@ -97,6 +95,7 @@ CREATE TABLE IF NOT EXISTS reports (
     status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'submitted', 'reviewed')),
     achievements TEXT NOT NULL DEFAULT '[]',
     achievement_notes TEXT NOT NULL DEFAULT '',
+    achievement_other TEXT NOT NULL DEFAULT '',
     leaving_date TEXT,
     leaving_reason TEXT NOT NULL DEFAULT '',
     submitted_at TEXT,
@@ -185,6 +184,9 @@ def connect(path=None):
 
 def init(conn):
     conn.executescript(SCHEMA)
+    # Columns added after the first release (CREATE TABLE IF NOT EXISTS leaves older tables as they were).
+    if "achievement_other" not in [c["name"] for c in conn.execute("PRAGMA table_info(reports)")]:
+        conn.execute("ALTER TABLE reports ADD COLUMN achievement_other TEXT NOT NULL DEFAULT ''")
     for key, value in DEFAULT_SETTINGS.items():
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value))
     conn.commit()
@@ -427,6 +429,7 @@ def report_bundle(conn, tutor_id, student_id, month):
             "status": report_status(report, len(sessions)),
             "achievements": json.loads(report["achievements"]) if report else [],
             "achievement_notes": report["achievement_notes"] if report else "",
+            "achievement_other": report["achievement_other"] if report else "",
             "leaving_date": report["leaving_date"] if report else None,
             "leaving_reason": report["leaving_reason"] if report else "",
             "submitted_at": report["submitted_at"] if report else None,
