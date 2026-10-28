@@ -5,3 +5,5 @@ __pycache__/
 
 # Client source documents (not for a public repo)
 *.pdf
+.venv/
+.env

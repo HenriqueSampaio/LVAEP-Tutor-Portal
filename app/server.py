@@ -12,7 +12,7 @@ from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import db, exports, reminders
+from . import db, exports, mailer, reminders
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
 TOKEN_DAYS = 14
@@ -557,7 +557,11 @@ def staff_tutor_create(ctx):
     db.notify(ctx.conn, cur.lastrowid, "welcome",
               "Welcome to LVAEP tutor reporting! Log each session here and submit each month when you're done.")
     db.audit(ctx.conn, ctx.user["id"], "account.create", f"{role} {b['name']} <{b['email']}>")
-    return {"id": cur.lastrowid, "temp_password": temp}
+    # Email them an invitation link; the temporary password stays as a fallback.
+    from . import accounts
+    user = ctx.conn.execute("SELECT * FROM users WHERE id = ?", (cur.lastrowid,)).fetchone()
+    accounts.send_link(ctx.conn, user, "invite", ctx.user["id"])
+    return {"id": cur.lastrowid, "temp_password": temp, "email": mailer.status()}
 
 
 @route("PUT", r"/api/staff/tutors/(?P<id>\d+)", role="staff")
@@ -871,8 +875,13 @@ def scheduler_loop(interval):
 def serve(host="127.0.0.1", port=8070, scheduler=True):
     conn = db.connect()
     db.init(conn)
+    mailer.init(conn)
     conn.close()
     httpd = ThreadingHTTPServer((host, port), Handler)
     if scheduler:
         threading.Thread(target=scheduler_loop, args=(1800,), daemon=True).start()
+        mailer.start_worker()
     return httpd
+
+
+from . import accounts  # noqa: E402,F401  (registers the invitation and password-link routes)

@@ -67,6 +67,7 @@ def start_server():
     for suffix in ("", "-wal", "-shm"):
         if os.path.exists(db.DB_PATH + suffix):
             os.remove(db.DB_PATH + suffix)
+    db.reset()  # also clears the Postgres test database when DATABASE_URL is set
     conn = db.connect()
     db.init(conn)
     conn.execute("INSERT INTO users (name, email, role, password_hash) VALUES ('Staff One', 'staff@test.example', 'staff', ?)",

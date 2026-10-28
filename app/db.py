@@ -9,6 +9,8 @@ import secrets
 import sqlite3
 
 DB_PATH = os.environ.get("LVAEP_DB", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "lvaep.sqlite3"))
+# Set DATABASE_URL (e.g. a Supabase Postgres connection string) to use Postgres instead of SQLite.
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 
 ATTENDANCE_CODES = {
     "present": "Present",
@@ -145,10 +147,18 @@ DEFAULT_SETTINGS = {
     "reminder_overdue": "1",     # remind on the 3rd for last month's missing reports
     "reminder_weekly": "0",      # weekly nudge when nothing was logged in 7 days
     "reminder_weekly_day": "4",  # 0 = Monday ... 4 = Friday
+    "email_notifications": "1",  # also email notifications (invites and password links are always emailed)
 }
 
 
+def using_postgres(path=None):
+    return bool(DATABASE_URL) and path is None
+
+
 def connect(path=None):
+    if using_postgres(path):
+        from . import pg
+        return pg.connect(DATABASE_URL)
     path = path or DB_PATH
     os.makedirs(os.path.dirname(path), exist_ok=True)
     conn = sqlite3.connect(path, timeout=10)
@@ -163,6 +173,40 @@ def init(conn):
     for key, value in DEFAULT_SETTINGS.items():
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value))
     conn.commit()
+
+
+def table_names():
+    """Every table the app creates (from SCHEMA plus the email/sign-in-link tables)."""
+    import re
+    from . import mailer
+    return re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", SCHEMA + mailer.SCHEMA)
+
+
+def reset():
+    """Delete all app data. SQLite: removes the file. Postgres: drops the app's tables — only when
+    LVAEP_ALLOW_RESET=1, so a typo can't wipe the shared Supabase database."""
+    if using_postgres():
+        if os.environ.get("LVAEP_ALLOW_RESET") != "1":
+            raise RuntimeError("Refusing to wipe the Postgres database. Set LVAEP_ALLOW_RESET=1 if you really mean it.")
+        from . import pg
+        conn = connect()
+        try:
+            pg.drop_tables(conn._conn, reversed(table_names()))
+        finally:
+            conn.close()
+        return
+    for suffix in ("", "-wal", "-shm"):
+        if os.path.exists(DB_PATH + suffix):
+            os.remove(DB_PATH + suffix)
+
+
+def is_empty(conn):
+    """True if no accounts exist yet (a brand-new database)."""
+    try:
+        return conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"] == 0
+    except Exception:
+        conn.rollback()
+        return True
 
 
 # ---------- time ----------
@@ -239,10 +283,12 @@ def audit(conn, user_id, action, detail=""):
 
 
 def notify(conn, user_id, kind, message, link=""):
-    conn.execute(
+    cur = conn.execute(
         "INSERT INTO notifications (user_id, kind, message, link) VALUES (?, ?, ?, ?)",
         (user_id, kind, message, link),
     )
+    from . import mailer
+    mailer.queue_notification(conn, cur.lastrowid, user_id, kind, message, link)
 
 
 def setting(conn, key):
