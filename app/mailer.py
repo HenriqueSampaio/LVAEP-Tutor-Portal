@@ -137,7 +137,8 @@ def render(title, paragraphs, button_text=None, button_url=None, footer=None):
                   f'{html.escape(button_text or "Open LVAEP Tutor Hours")}</a></p>'
                   f'<p style="margin:0 0 14px;font-size:13px;color:#6b7280">Or copy this link: '
                   f'<span style="word-break:break-all">{html.escape(button_url)}</span></p>')
-    body = f"""<!doctype html><html><body style="margin:0;background:#f4f6f9">
+    body = f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(title)}</title></head><body style="margin:0;background:#f4f6f9">
 <div style="max-width:560px;margin:0 auto;padding:24px 16px;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.5;color:#1f2937">
 <div style="background:#1f3a5f;color:#ffffff;padding:14px 20px;border-radius:10px 10px 0 0;font-weight:bold">LVAEP Tutor Hours
 <div style="font-weight:normal;font-size:12px;opacity:.85">Literacy Volunteers of America · Essex &amp; Passaic</div></div>
@@ -205,8 +206,9 @@ def _save_file(row):
     banner = (f'<div style="font-family:monospace;font-size:12px;background:#fff7d6;padding:8px 12px">'
               f'To: {html.escape(row["to_name"])} &lt;{html.escape(row["to_email"])}&gt; · '
               f'Subject: {html.escape(row["subject"])} · not sent (no RESEND_API_KEY)</div>')
+    page = re.sub(r"(<body[^>]*>)", lambda m: m.group(1) + banner, row["html"], count=1)
     with open(path, "w", encoding="utf-8") as f:
-        f.write(banner + row["html"])
+        f.write(page if page != row["html"] else banner + row["html"])
     return path
 
 

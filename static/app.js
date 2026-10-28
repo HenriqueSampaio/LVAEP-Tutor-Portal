@@ -129,6 +129,8 @@ async function render() {
   try {
     if (!state.meta) state.meta = await api('/api/meta');
     if (path === '/login') return viewLogin();
+    if (path === '/forgot') return viewForgot();
+    if (path === '/set-password') return await viewSetPassword(q);
     if (!state.me) {
       const r = await api('/api/me');
       state.me = r.user; state.unread = r.unread;
@@ -209,7 +211,7 @@ function viewLogin() {
       <label class="field"><span>Password</span><input class="input" type="password" name="password" autocomplete="current-password" required></label>
       <button class="btn primary block" type="submit">Sign in</button>
     </form>
-    <p class="small muted" style="margin:14px 0 0">Forgot your password? Ask LVAEP staff to reset it.</p>
+    <p class="small" style="margin:14px 0 0"><a href="#/forgot">Forgot your password?</a></p>
     <div class="demo-accounts"><b>Prototype demo accounts</b> <span class="muted">(password <code>demo1234</code>, synthetic data)</span>
       <button type="button" data-action="demo" data-email="dana@lvaep.example"><span>Dana Whitfield</span><span class="muted">Staff</span></button>
       <button type="button" data-action="demo" data-email="maria@tutors.example"><span>Maria Santos</span><span class="muted">Tutor · 3 students</span></button>
@@ -229,6 +231,75 @@ function viewLogin() {
       const box = $('#login-form .error');
       box.textContent = err.message; box.hidden = false;
     }
+  });
+}
+
+function authCard(content) {
+  topbar.hidden = true;
+  app.className = '';
+  app.innerHTML = String(html`<div class="login-wrap"><div class="card login-card">
+    <div class="brand"><img src="/favicon.svg" alt="" width="34" height="34"><span>LVAEP Tutor Hours<small>Literacy Volunteers of America — Essex &amp; Passaic Counties</small></span></div>
+    ${content}</div></div>`);
+}
+
+function viewForgot() {
+  authCard(html`<h1 style="margin-bottom:6px">Forgot your password?</h1>
+    <p class="muted" style="margin:0 0 18px">Enter the email you use for LVAEP Tutor Hours and we'll email you a link to choose a new password.</p>
+    <form id="forgot-form">
+      <div class="error banner alert" hidden></div>
+      <label class="field"><span>Email</span><input class="input" type="email" name="email" autocomplete="username" required></label>
+      <button class="btn primary block" type="submit">Email me a link</button>
+    </form>
+    <p class="small" style="margin:14px 0 0"><a href="#/login">‹ Back to sign in</a></p>`);
+  $('#forgot-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const { email } = Object.fromEntries(new FormData(e.target));
+    try {
+      await api('/api/password/forgot', { method: 'POST', body: { email } });
+      authCard(html`<h1 style="margin-bottom:6px">Check your email</h1>
+        <p>If <b>${email}</b> has an LVAEP Tutor Hours account, we've sent it a link to choose a new password. The link works for 24 hours.</p>
+        <p class="small muted">Nothing arrived after a few minutes? Check your spam folder, or ask LVAEP staff to send you a new link.</p>
+        <p class="small" style="margin:14px 0 0"><a href="#/login">‹ Back to sign in</a></p>`);
+    } catch (err) {
+      const box = $('#forgot-form .error');
+      box.textContent = err.message; box.hidden = false;
+    }
+  });
+}
+
+async function viewSetPassword(q) {
+  let info;
+  try {
+    info = await api(`/api/password/link?token=${encodeURIComponent(q.token || '')}`);
+  } catch (err) {
+    return authCard(html`<h1 style="margin-bottom:6px">This link doesn't work anymore</h1>
+      <p>${err.message}</p>
+      <div class="row"><a class="btn primary" href="#/forgot">Email me a new link</a><a class="btn ghost" href="#/login">Sign in</a></div>`);
+  }
+  const invite = info.purpose === 'invite';
+  authCard(html`<h1 style="margin-bottom:6px">${invite ? `Welcome, ${info.name.split(' ')[0]}!` : 'Choose a new password'}</h1>
+    <p class="muted" style="margin:0 0 18px">${invite ? 'Choose a password to finish setting up your LVAEP Tutor Hours account.' : 'Choose a new password for your account.'}
+      You'll sign in with <b>${info.email}</b>.</p>
+    <form id="set-pw-form">
+      <div class="error banner alert" hidden></div>
+      <input type="email" name="username" value="${info.email}" autocomplete="username" hidden>
+      <label class="field"><span>New password <span class="hint">· at least 8 characters</span></span><input class="input" type="password" name="password" minlength="8" autocomplete="new-password" required></label>
+      <label class="field"><span>Repeat new password</span><input class="input" type="password" name="repeat" minlength="8" autocomplete="new-password" required></label>
+      <button class="btn primary block" type="submit">${invite ? 'Create my account' : 'Save new password'}</button>
+    </form>`);
+  $('#set-pw-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const d = Object.fromEntries(new FormData(e.target));
+    const box = $('#set-pw-form .error');
+    if (d.password !== d.repeat) { box.textContent = 'The passwords do not match.'; box.hidden = false; return; }
+    try {
+      const r = await api('/api/password/link', { method: 'POST', body: { token: q.token, password: d.password } });
+      state.me = r.user;
+      const me = await api('/api/me');
+      state.unread = me.unread;
+      toast(invite ? 'Your account is ready.' : 'Password saved.');
+      go('#/');
+    } catch (err) { box.textContent = err.message; box.hidden = false; }
   });
 }
 
@@ -743,7 +814,7 @@ async function viewTutors() {
         <td>${u.active ? (u.must_change_password ? html`<span class="chip neutral">Invite pending</span>` : 'Active') : 'Deactivated'}</td>
         <td><button class="btn sm" data-action="edit-account" data-id="${u.id}">Edit</button></td></tr>`)}</tbody>
     </table></div>
-    <p class="small muted">Tutors are assigned students after completing 10 hours of training. New accounts get a temporary password that the person must change at first sign-in.</p>`);
+    <p class="small muted">Tutors are assigned students after completing 10 hours of training. New accounts get an email invitation to choose their password (a temporary password is shown too, as a backup).</p>`);
 }
 
 function accountDialog(u) {
@@ -762,13 +833,14 @@ function accountDialog(u) {
     </div>
     ${isNew ? '' : html`<label class="check"><input type="checkbox" name="active" value="1" ${u.active ? raw('checked') : ''}><span>Account is active <span class="muted small">— uncheck to block sign-in (history is kept)</span></span></label>`}
     <div class="dialog-actions">
-      ${isNew ? '' : html`<button type="button" class="btn" data-action="reset-password" data-id="${u.id}" style="margin-right:auto">Reset password</button>`}
+      ${isNew ? '' : html`<button type="button" class="btn" data-action="send-link" data-id="${u.id}" style="margin-right:auto" title="Email them a link to ${u.must_change_password ? 'accept their invitation' : 'choose a new password'}">${icon('send')} Email sign-in link</button>
+        <button type="button" class="btn ghost" data-action="reset-password" data-id="${u.id}">Temporary password</button>`}
       <button type="button" class="btn" data-action="close">Cancel</button>
       <button type="submit" class="btn primary">${isNew ? 'Create account' : 'Save'}</button>
     </div></form>`, async (data) => {
     if (isNew) {
       const r = await api('/api/staff/tutors', { method: 'POST', body: data });
-      showTempPassword(data.name, data.email, r.temp_password, true);
+      showTempPassword(data.name, data.email, r.temp_password, true, r.email);
     } else {
       await api(`/api/staff/tutors/${u.id}`, { method: 'PUT', body: { ...data, active: !!data.active } });
       closeDialog();
@@ -778,28 +850,52 @@ function accountDialog(u) {
   });
 }
 
-function showTempPassword(name, email, pw, created) {
+function emailNote(status) {
+  if (!status) return '';
+  if (status.mode === 'resend') return status.redirect_to ? ` (test mode: it actually goes to ${status.redirect_to})` : '';
+  if (status.mode === 'outbox') return ' — email isn\'t connected yet, so it was saved on the server instead of sent';
+  return ' — email is turned off, so it was not sent';
+}
+
+function showTempPassword(name, email, pw, created, status) {
+  const emailed = created && status && status.mode === 'resend';
   openDialog(html`<div class="dialog-inner">
-    <h2>${created ? 'Account created' : 'Password reset'}</h2>
-    <p>Give <b>${name}</b> these sign-in details. They'll choose their own password when they first sign in.</p>
+    <h2>${created ? 'Account created' : 'Temporary password'}</h2>
+    ${created ? html`<p>We emailed <b>${name}</b> an invitation at <b>${email}</b> to choose their password${emailNote(status)}.</p>` : ''}
+    ${emailed ? html`<details><summary class="small">Show a temporary password instead (if the email doesn't arrive)</summary>` : ''}
+    <p${emailed ? '' : raw(' style="margin-top:0"')}>${created ? 'Or give' : 'Give'} <b>${name}</b> these sign-in details. They'll choose their own password when they first sign in.</p>
     <dl class="kv"><dt>Sign-in page</dt><dd>${location.origin}</dd><dt>Email</dt><dd>${email}</dd></dl>
     <p class="small muted" style="margin-bottom:6px">Temporary password (shown once):</p>
     <div class="temp-pw">${pw}</div>
-    <p class="small muted">In the full release this would be emailed automatically; email delivery isn't configured in the prototype.</p>
+    ${emailed ? raw('</details>') : ''}
     <div class="dialog-actions"><button type="button" class="btn primary" data-action="close-render">Done</button></div></div>`);
 }
 
 /* ---------- staff: reminders ---------- */
 const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+const EMAIL_KIND = { invite: 'Invitation', reset: 'Password reset', month_end: 'Month-end reminder', overdue: 'Overdue reminder',
+  manual: 'Reminder from staff', weekly: 'Weekly nudge', returned: 'Report returned', assigned: 'New student', leaving: 'Student stopped',
+  calendar: 'Schedule update' };
+const EMAIL_STATUS = { queued: 'Waiting to send', sent: 'Sent', saved: 'Saved (not sent)', failed: 'Failed — will retry', skipped: 'Skipped' };
+function emailBanner(st) {
+  if (st.mode === 'resend') {
+    return html`<div class="banner info">${icon('send')}<div><b>Emails are on.</b><p>Reminders and other notifications are emailed from <b>${st.from}</b> as well as shown in the notification bell.${st.redirect_to ? html` <b>Test mode:</b> every email currently goes to ${st.redirect_to}.` : ''}</p></div></div>`;
+  }
+  if (st.mode === 'outbox') {
+    return html`<div class="banner info">${icon('bell')}<div><b>Email isn't connected yet.</b><p>Reminders appear in each tutor's notification bell. Emails are saved on the server for previewing instead of being sent — add a Resend API key to send them (see the README).</p></div></div>`;
+  }
+  return html`<div class="banner info">${icon('bell')}<div><b>Email is turned off.</b><p>Reminders appear in each tutor's notification bell only.</p></div></div>`;
+}
+
 async function viewReminders() {
-  const d = await api('/api/staff/reminders');
+  const [d, mail] = await Promise.all([api('/api/staff/reminders'), api('/api/staff/emails')]);
   const s = d.settings;
   const cur = thisMonth();
   const prev = shiftMonth(cur, -1);
   const KIND = { month_end: 'Last day of month', overdue: 'Overdue (3rd of month)', weekly: 'Weekly nudge', manual: 'Sent by staff' };
   paint(html`
     <div class="page-head"><div><h1>Reminders</h1><p class="muted" style="margin:2px 0 0">So staff don't have to chase tutors for their hours.</p></div></div>
-    <div class="banner info">${icon('bell')}<div><b>Reminders appear in each tutor's notification bell.</b><p>Email/SMS delivery isn't connected in this prototype — each reminder is recorded so it can be sent by email once LVAEP picks a provider.</p></div></div>
+    ${emailBanner(mail.status)}
     <div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr))">
       <section class="card card-pad"><h2>Automatic reminders</h2>
         <form id="rem-form">
@@ -807,6 +903,7 @@ async function viewReminders() {
           <label class="switch"><input type="checkbox" name="reminder_overdue" ${s.reminder_overdue === '1' ? raw('checked') : ''}><span><b>Overdue follow-up</b><br><span class="small muted">On the 3rd, tutors who still haven't submitted last month get a second reminder.</span></span></label>
           <label class="switch"><input type="checkbox" name="reminder_weekly" ${s.reminder_weekly === '1' ? raw('checked') : ''}><span><b>Weekly nudge</b><br><span class="small muted">Tutors who logged nothing in the past 7 days get a reminder on
             <select class="input" name="reminder_weekly_day" style="display:inline-block;width:auto;min-height:32px;padding:2px 8px">${WEEKDAYS.map((w, i) => html`<option value="${i}" ${String(i) === s.reminder_weekly_day ? raw('selected') : ''}>${w}</option>`)}</select>.</span></span></label>
+          <label class="switch"><input type="checkbox" name="email_notifications" ${s.email_notifications !== '0' ? raw('checked') : ''}><span><b>Also send notifications by email</b><br><span class="small muted">Reminders, returned reports, new students and schedule changes are emailed too. Invitations and password links are always emailed.</span></span></label>
         </form>
         <button class="btn sm" data-action="run-reminders" style="margin-top:6px">Run today's check now</button>
       </section>
@@ -819,12 +916,19 @@ async function viewReminders() {
     <div class="section-title"><h2>Reminder history</h2></div>
     <div class="card table-wrap"><table class="data"><thead><tr><th>When</th><th>Type</th><th>For</th><th class="n">Tutors notified</th><th>By</th></tr></thead>
       <tbody>${d.runs.map((r) => html`<tr><td class="nowrap">${fmtDT(r.ran_at)}</td><td>${KIND[r.kind] || r.kind}</td><td>${r.kind === 'weekly' ? r.period_key : monthLabel(r.period_key)}</td><td class="n">${r.recipients}</td><td>${r.triggered_by_name || 'Automatic'}</td></tr>`)}
-      ${d.runs.length ? '' : html`<tr><td colspan="5" class="empty">No reminders sent yet.</td></tr>`}</tbody></table></div>`);
+      ${d.runs.length ? '' : html`<tr><td colspan="5" class="empty">No reminders sent yet.</td></tr>`}</tbody></table></div>
+    <div class="section-title"><h2>Recent emails</h2></div>
+    <div class="card table-wrap"><table class="data"><thead><tr><th>When</th><th>To</th><th>Email</th><th>Status</th></tr></thead>
+      <tbody>${mail.items.map((m) => html`<tr><td class="nowrap">${fmtDT(m.created_at)}</td><td>${m.to_name}<div class="sub">${m.to_email}</div></td>
+        <td>${EMAIL_KIND[m.kind] || m.kind}<div class="sub">${m.subject}</div></td>
+        <td>${EMAIL_STATUS[m.status] || m.status}${m.status === 'failed' || m.status === 'skipped' ? html`<div class="sub">${m.last_error}</div>` : ''}</td></tr>`)}
+      ${mail.items.length ? '' : html`<tr><td colspan="4" class="empty">No emails yet.</td></tr>`}</tbody></table></div>`);
   $('#rem-form').addEventListener('change', async (e) => {
     const f = e.currentTarget;
     await api('/api/staff/reminders/settings', { method: 'PUT', body: {
       reminder_month_end: f.reminder_month_end.checked ? '1' : '0', reminder_overdue: f.reminder_overdue.checked ? '1' : '0',
-      reminder_weekly: f.reminder_weekly.checked ? '1' : '0', reminder_weekly_day: f.reminder_weekly_day.value } });
+      reminder_weekly: f.reminder_weekly.checked ? '1' : '0', reminder_weekly_day: f.reminder_weekly_day.value,
+      email_notifications: f.email_notifications.checked ? '1' : '0' } });
     toast('Reminder settings saved.');
   });
 }
@@ -968,6 +1072,12 @@ const actions = {
     async (data) => { await api(`/api/staff/assignments/${a.id}/end`, { method: 'POST', body: data }); closeDialog(); toast('Assignment ended.'); render(); });
   },
   'new-account': () => accountDialog(),
+  async 'send-link'(el) {
+    const u = state.tutors.find((x) => x.id === Number(el.dataset.id));
+    const r = await api(`/api/staff/tutors/${u.id}/send-link`, { method: 'POST', body: {} });
+    closeDialog();
+    toast(`${r.purpose === 'invite' ? 'Invitation' : 'Sign-in link'} emailed to ${u.email}${emailNote(r.email)}.`);
+  },
   'edit-account': (el) => accountDialog(state.tutors.find((u) => u.id === Number(el.dataset.id))),
   async 'reset-password'(el) {
     const u = state.tutors.find((x) => x.id === Number(el.dataset.id));
