@@ -79,3 +79,9 @@ data/lvaep.sqlite3     created on first run (gitignore it)
 ## Not production-ready yet
 
 Before real data goes in, see PRD §3: **HTTPS hosting**, backups, data retention, **email delivery**, password reset by email, login rate limiting, hosting/ownership decisions, and a privacy review of student data. The prototype uses PBKDF2 password hashes, HttpOnly SameSite cookies, assignment-based access checks and an audit log. It has not been security-reviewed.
+
+## Supabase database and email
+
+Everything above runs with no setup (SQLite, emails saved to `data/outbox/`). To store data in **Supabase**
+and send **invitations, password resets and notification emails** through Resend, see
+**[docs/SETUP.md](docs/SETUP.md)**, which covers setup, security, hosting and costs. Quick check of your settings: `python3 check_setup.py`.

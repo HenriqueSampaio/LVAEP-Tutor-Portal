@@ -8,14 +8,19 @@
 import argparse
 import os
 
-from app import db, mailer, seed
-from app.server import serve
+from app import env
+
+env.load()  # .env settings must be in place before app.db reads DATABASE_URL
+
+from app import db, mailer, seed  # noqa: E402
+from app.server import serve  # noqa: E402
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--host", default="127.0.0.1", help="use 0.0.0.0 to open it from a phone on the same Wi-Fi")
-    p.add_argument("--port", type=int, default=8070)
+    p.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"),
+                   help="use 0.0.0.0 to open it from a phone on the same Wi-Fi (or on a hosting service)")
+    p.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8070)))
     p.add_argument("--reset", action="store_true",
                    help="delete the database and reload demo data (on Postgres also needs LVAEP_ALLOW_RESET=1)")
     p.add_argument("--empty", action="store_true", help="with --reset or on first run: no demo data")
