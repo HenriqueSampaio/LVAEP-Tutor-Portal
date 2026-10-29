@@ -1047,9 +1047,11 @@ function calGrid(days, events) {
       const { lane, lanes: n } = lanes.get(e.id);
       const top = (toMin(e.start_time) - startH * 60) / 60;
       const len = (toMin(e.end_time) - toMin(e.start_time)) / 60;
-      return html`<button type="button" class="cal-event ${e.status}" data-action="cal-event" data-id="${e.id}" title="${eventTitle(e)}"
+      // short blocks drop the status chip (the color still shows it); half-hour ones go on one line
+      const fit = len <= 0.5 ? 'short tiny' : len < 1 ? 'short' : '';
+      return html`<button type="button" class="cal-event ${e.status} ${fit}" data-action="cal-event" data-id="${e.id}" title="${eventTitle(e)}"
           style="top:calc(${top} * var(--hour));height:calc(${len} * var(--hour));left:calc(${lane} * 100% / ${n});width:calc(100% / ${n})">
-          <span class="t">${fmtRange(e.start_time, e.end_time)}</span><span class="w">${eventWho(e)}</span>${calChip(e.status)}</button>`;
+          <span class="t">${len <= 0.5 ? fmtTime(e.start_time) : fmtRange(e.start_time, e.end_time)}</span><span class="w">${eventWho(e)}</span>${calChip(e.status)}</button>`;
     })}</div>`;
   })}
     </div></div>`;

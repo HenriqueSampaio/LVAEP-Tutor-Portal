@@ -288,7 +288,8 @@ table.data .sub { font-size: .8rem; color: var(--ink-3); }
 .cal-dots { display: none; }
 
 /* week & day time grid */
-.cal-grid { --hour: 48px; overflow: hidden; }
+.cal-grid { --hour: 60px; overflow: hidden; }
+.cal-grid.single { --hour: 66px; }
 .cal-grid-head, .cal-grid-body { display: grid; grid-template-columns: 56px repeat(var(--cols), minmax(0, 1fr)); }
 .cal-grid-head { border-bottom: 1px solid var(--line); background: #fafbfc; }
 .cal-grid-head a { padding: 6px 2px; text-align: center; color: var(--ink-2); text-decoration: none; line-height: 1.2; }
@@ -303,8 +304,12 @@ table.data .sub { font-size: .8rem; color: var(--ink-3); }
 .cal-col.today { background: rgba(232, 238, 246, .5); }
 .cal-event { position: absolute; display: flex; flex-direction: column; gap: 1px; padding: 3px 6px; border-radius: 6px; font-size: .75rem; line-height: 1.25; overflow: hidden; box-shadow: 0 0 0 1px #fff; }
 .cal-event:hover, .cal-pill:hover, .cal-item:hover { filter: brightness(.97); }
-.cal-event .t { font-weight: 600; white-space: nowrap; }
-.cal-event .w { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cal-event > * { flex-shrink: 0; } /* never squash a line; if space runs out, whole lines drop off the bottom */
+.cal-event .t, .cal-event .w { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cal-event .t { font-weight: 600; }
+.cal-event.short .chip { display: none; }
+.cal-event.tiny { flex-direction: row; align-items: baseline; gap: 6px; padding-top: 1px; padding-bottom: 1px; }
+.cal-event.tiny .w { flex-shrink: 1; min-width: 0; }
 .cal-event .chip, .cal-item .chip { align-self: flex-start; font-size: .68rem; padding: 0 7px; }
 .cal-grid.single .cal-event { font-size: .85rem; padding: 4px 10px; }
 .cal-narrow { display: none; }
