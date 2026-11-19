@@ -1,11 +1,13 @@
 # Not uploaded to Vercel. The site needs index.py, app/, public/ and requirements.txt only.
-# (server.py is excluded on purpose: Vercel's Python preset looks for an entrypoint named
-# server.py before index.py, and ours has no `app` in it.)
+# Patterns follow .gitignore rules: a leading slash anchors to the project root (a bare
+# "server.py" would also drop app/server.py, which the site needs).
+# /server.py is excluded on purpose: Vercel's Python preset looks for an entrypoint named
+# server.py before index.py, and ours has no `app` in it.
 .venv
-data
-tests
-docs
-routine_updates
+/data
+/tests
+/docs
+/routine_updates
 *.pdf
 __pycache__
 *.pyc
@@ -14,7 +16,7 @@ __pycache__
 !.env.example
 .DS_Store
 .git
-README.md
-check_setup.py
-bootstrap_admin.py
-server.py
+/README.md
+/check_setup.py
+/bootstrap_admin.py
+/server.py
