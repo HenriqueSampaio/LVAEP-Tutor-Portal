@@ -84,6 +84,9 @@ def check_email(send_to):
         say(WARN, "Email is turned off (EMAIL_MODE=off).")
     elif st["mode"] == "outbox":
         say(WARN, f"No RESEND_API_KEY: emails are saved as files in {st['outbox_dir']} instead of being sent.")
+    elif st["mode"] == "stored":
+        say(WARN, "No RESEND_API_KEY: emails are kept in the database (staff can preview them under Reminders) "
+                  "instead of being sent.")
     else:
         say(OK, f"Sending through Resend from: {st['from']}")
         if "resend.dev" in st["from"]:
