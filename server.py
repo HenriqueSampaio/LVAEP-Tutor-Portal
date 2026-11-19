@@ -9,6 +9,7 @@ import argparse
 import os
 import secrets
 import sys
+from urllib.parse import urlsplit
 
 from app import env
 
@@ -28,6 +29,9 @@ def main():
     p.add_argument("--empty", action="store_true", help="with --reset or on first run: no demo data")
     p.add_argument("--demo", action="store_true",
                    help="load the synthetic demo data into an empty Postgres database (SQLite does this by default)")
+    p.add_argument("--background", action="store_true",
+                   help="also run the reminder scheduler and email worker when the database is a remote Postgres "
+                        "(off by default there: a laptop must not act as the live site's scheduler)")
     args = p.parse_args()
 
     if args.reset:
@@ -57,11 +61,16 @@ def main():
             print(f"Loaded synthetic demo data (password for every demo account: {seed.DEMO_PASSWORD})")
         mailer.paused = False
     conn.close()
-    where = "Postgres (DATABASE_URL)" if db.using_postgres() else db.DB_PATH
+    remote = db.using_postgres() and (urlsplit(db.DATABASE_URL).hostname or "") not in ("", "localhost", "127.0.0.1", "::1")
+    where = f"Postgres at {urlsplit(db.DATABASE_URL).hostname}" if db.using_postgres() else db.DB_PATH
     print(f"Database: {where} · Email: {mailer.mode()}"
           + (f" (every email goes to {mailer.redirect_to()})" if mailer.redirect_to() else ""))
+    background = not remote or args.background
+    if remote and not background:
+        print("Remote database: the reminder scheduler and email worker are OFF on this machine (the hosted site "
+              "runs them). Pass --background if this computer really is the server.")
 
-    httpd = serve(args.host, args.port)
+    httpd = serve(args.host, args.port, scheduler=background)
     print(f"LVAEP tutor reporting running at http://{'localhost' if args.host in ('127.0.0.1', '0.0.0.0') else args.host}:{args.port}")
     try:
         httpd.serve_forever()

@@ -248,22 +248,27 @@ def has_queued():
     return _wake.is_set()
 
 
-def deliver_pending(conn=None, limit=50):
-    """Send (or save) queued emails. Safe to call any time; returns how many were handled."""
+def deliver_pending(conn=None, limit=50, budget=None):
+    """Send (or save) queued emails. Safe to call any time; returns how many were handled. `budget` is a
+    time limit in seconds (serverless functions have one): whatever is left waits for the next pass."""
     own = conn is None
     conn = conn or db.connect()
     handled = 0
     _wake.clear()
     _local.queued = False
+    deadline = time.monotonic() + budget if budget else None
     try:
         rows = conn.execute(
-            """SELECT * FROM email_outbox WHERE status = 'queued' OR (status = 'failed' AND attempts < ?)
+            """SELECT * FROM email_outbox WHERE status IN ('queued', 'failed') AND attempts < ?
                ORDER BY id LIMIT ?""", (MAX_ATTEMPTS, limit + 1)).fetchall()
         if len(rows) > limit:  # more left: make sure the next pass happens
             rows = rows[:limit]
             _wake.set()
         m = mode()
         for row in rows:
+            if deadline and time.monotonic() > deadline:
+                _wake.set()
+                break
             # Claim this attempt first: a concurrent request or the daily job may be delivering the same
             # queue. The attempt counter doubles as an optimistic lock, so exactly one of them sends.
             claimed = conn.execute("UPDATE email_outbox SET attempts = attempts + 1 WHERE id = ? AND attempts = ?",

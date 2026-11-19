@@ -65,6 +65,33 @@ class TranslateTest(unittest.TestCase):
         self.assertEqual(pg._with_ssl("postgresql:///lvaep_test"), "postgresql:///lvaep_test")
         self.assertEqual(pg._with_ssl("postgresql://u:p@h/x?sslmode=disable"), "postgresql://u:p@h/x?sslmode=disable")
 
+    def test_schema_isolation_refuses_the_transaction_pooler(self):
+        from unittest import mock
+        with mock.patch.object(pg, "SCHEMA", "lvaep_test"):
+            with self.assertRaises(RuntimeError):
+                pg.connect("postgresql://u:p@aws-0-us-east-1.pooler.supabase.com:6543/postgres")
+            self.assertIsNone(pg._refuse_transaction_pooler("postgresql://u:p@aws-0-us-east-1.pooler.supabase.com:5432/postgres"))
+        self.assertIsNone(pg._refuse_transaction_pooler("postgresql://u:p@h:6543/postgres"))  # no schema set: fine
+
+    def test_connection_errors_are_recognised_through_psycopg_subclasses(self):
+        from app import db
+
+        class OperationalError(Exception):
+            pass
+
+        class AdminShutdown(OperationalError):
+            pass
+
+        class UndefinedTable(Exception):
+            pass
+
+        for cls in (OperationalError, AdminShutdown, UndefinedTable):
+            cls.__module__ = "psycopg.errors"
+        self.assertTrue(db.is_connection_error(AdminShutdown("server shutting down")))
+        self.assertTrue(db.is_connection_error(OperationalError("connection failed")))
+        self.assertFalse(db.is_connection_error(UndefinedTable("relation does not exist")))
+        self.assertFalse(db.is_connection_error(ValueError("bug")))
+
 
 if __name__ == "__main__":
     unittest.main()

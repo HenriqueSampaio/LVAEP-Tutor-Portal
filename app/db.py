@@ -195,6 +195,14 @@ def connect(path=None):
 
 
 def init(conn):
+    # Databases from before idx_reminder_runs_auto may hold two automatic runs for one period (the race the
+    # index now prevents); the unique index can't be built over them, so keep the first of each pair.
+    try:
+        conn.execute("""DELETE FROM reminder_runs WHERE triggered_by IS NULL AND id NOT IN
+                        (SELECT MIN(id) FROM reminder_runs WHERE triggered_by IS NULL GROUP BY kind, period_key)""")
+        conn.commit()
+    except Exception:  # brand-new database: no table yet
+        conn.rollback()
     conn.executescript(SCHEMA)
     # Columns added after the first release (CREATE TABLE IF NOT EXISTS leaves older tables as they were).
     if "achievement_other" not in [c["name"] for c in conn.execute("PRAGMA table_info(reports)")]:
@@ -340,12 +348,15 @@ def audit(conn, user_id, action, detail=""):
 
 
 def is_connection_error(exc):
-    """True when the database is down or unreachable (as opposed to a bug in a request)."""
+    """True when the database is down or unreachable (as opposed to a bug in a request). psycopg maps
+    server-side failures (shutdown, 'starting up', too many connections…) to subclasses, so look at the
+    whole class hierarchy, not just the leaf name."""
     if isinstance(exc, (sqlite3.OperationalError, OSError)):
         return True
     module = type(exc).__module__ or ""
-    return module.startswith("psycopg") and type(exc).__name__ in (
-        "OperationalError", "InterfaceError", "PoolTimeout", "ConnectionTimeout", "TooManyRequests")
+    names = {c.__name__ for c in type(exc).__mro__}
+    return module.startswith("psycopg") and bool(names & {
+        "OperationalError", "InterfaceError", "PoolTimeout", "ConnectionTimeout", "TooManyRequests"})
 
 
 def notify(conn, user_id, kind, message, link=""):

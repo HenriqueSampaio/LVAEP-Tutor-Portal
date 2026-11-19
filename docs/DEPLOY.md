@@ -38,9 +38,9 @@ Things that differ from `python3 server.py` on a laptop, all handled in code:
    The suite drops and recreates its tables. Safe options:
    - a second Supabase project (free) or a local Postgres, or
    - the live project **while it is still empty**, in its own schema. `LVAEP_PG_SCHEMA` makes the app work in
-     that schema only (`public` is not even on the search path, every destructive statement is
-     schema-qualified, and `reset()` refuses to run if the connection isn't in that schema); it needs a
-     session-mode connection (port 5432).
+     that schema only (`public` is not on the search path, every destructive statement is schema-qualified,
+     and every connection checks it really is in that schema). It needs a session-mode connection: the code
+     refuses a port-6543 (transaction pooler) URL outright, and the `sed` below switches the port.
    ```bash
    python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
    DATABASE_URL="$(grep '^DATABASE_URL=' .env | cut -d= -f2- | sed 's/:6543\//:5432\//')" \
@@ -97,8 +97,9 @@ Things that differ from `python3 server.py` on a laptop, all handled in code:
   LVAEP_ALLOW_RESET=1 .venv/bin/python -c 'from app import env; env.load(); from app import db; db.reset()'
   .venv/bin/python bootstrap_admin.py --name "Full Name" --email person@example.org
   ```
-  Never run `server.py` against the live database: a laptop run with `DATABASE_URL` in `.env` would start the
-  local scheduler and mailer threads against production. Use `DATABASE_URL= python3 server.py` for a local run.
+  Avoid running `server.py` against the live database. If you do (DATABASE_URL in `.env`), it now keeps the
+  scheduler and mailer threads OFF for a remote database unless you pass `--background`, so a laptop can't
+  act as the live site's scheduler. Use `DATABASE_URL= python3 server.py` for a normal local run.
 - **Backups:** Supabase Free has none. Export before risky changes (`pg_dump` with the session pooler URL,
   or Supabase dashboard → Database → Backups on Pro). Pro ($25/month) adds daily backups and removes the
   7-day inactivity pause. The daily cron's queries count as database activity, which should keep a Free

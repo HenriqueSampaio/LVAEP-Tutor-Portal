@@ -1070,7 +1070,7 @@ def cron_daily(ctx):
         raise ApiError(401, "Unauthorized.")
     ctx.conn.commit()
     sent = reminders.run_scheduled(ctx.conn)
-    handled = mailer.deliver_pending(ctx.conn)
+    handled = mailer.deliver_pending(ctx.conn, limit=200, budget=35)  # stays inside the function's time limit
     return {"ran_at": db.now_iso(), "today": db.today().isoformat(),
             "reminders": [{"kind": k, "recipients": n} for k, n in sent], "emails_handled": handled}
 
@@ -1197,7 +1197,7 @@ def run_route(fn, role, auth, params, query, method, path, headers, body_bytes):
         conn.commit()
         if INLINE_MAIL and (mailer.queued_in_request() or mailer.has_queued()):
             try:
-                mailer.deliver_pending(conn, limit=25)
+                mailer.deliver_pending(conn, limit=25, budget=8)
             except Exception:  # the action itself succeeded; delivery is retried by the daily job
                 traceback.print_exc()
         out = {}
@@ -1217,12 +1217,21 @@ def run_route(fn, role, auth, params, query, method, path, headers, body_bytes):
     except json.JSONDecodeError:
         conn.rollback()
         return Response(400, json.dumps({"error": "Request body is not valid JSON."}))
-    except Exception:
-        conn.rollback()
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         traceback.print_exc()
+        if db.is_connection_error(exc):
+            return Response(503, json.dumps({"error": "The site's database isn't reachable right now. "
+                                                      "Please try again in a minute."}), headers={"Retry-After": "60"})
         return Response(500, json.dumps({"error": "Something went wrong on the server."}))
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 class Handler(BaseHTTPRequestHandler):

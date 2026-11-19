@@ -45,16 +45,18 @@ def check_database():
         return
     try:
         version = conn.execute("SHOW server_version").fetchone()[0]
-        say(OK, f"Connected to Postgres {version}.")
+        schema = conn.execute("SELECT current_schema()").fetchone()[0]
+        say(OK, f"Connected to Postgres {version}, schema {schema}."
+            + (" (LVAEP_PG_SCHEMA is set — this is NOT the live schema)" if os.environ.get("LVAEP_PG_SCHEMA") else ""))
         db.init(conn)
         mailer.init(conn)
         tables = db.table_names()
         found = {r[0] for r in conn.execute(
-            "SELECT relname FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind = 'r'").fetchall()}
+            "SELECT relname FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relkind = 'r'").fetchall()}
         missing = [t for t in tables if t not in found]
         say(FAIL if missing else OK, f"Missing tables: {', '.join(missing)}" if missing else f"All {len(tables)} tables are there.")
         unlocked = [r[0] for r in conn.execute(
-            "SELECT relname FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind = 'r' "
+            "SELECT relname FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relkind = 'r' "
             "AND NOT relrowsecurity").fetchall() if r[0] in tables]
         say(FAIL if unlocked else OK, f"Row-level security is OFF for: {', '.join(unlocked)}" if unlocked
             else "Row-level security is on for every table.")

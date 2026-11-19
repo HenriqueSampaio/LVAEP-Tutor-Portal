@@ -179,7 +179,9 @@ def _row_factory(cursor):
 # ---------- connection ----------
 
 # prepare_threshold=None keeps Supabase's connection pooler happy (no server-side prepared statements).
-CONNECT_KWARGS = {"autocommit": False, "prepare_threshold": None, "row_factory": _row_factory, "connect_timeout": 15}
+# connect_timeout is per address tried; keep it short so a stuck network still answers inside the function's limit.
+CONNECT_KWARGS = {"autocommit": False, "prepare_threshold": None, "row_factory": _row_factory, "connect_timeout": 8}
+TRANSACTION_POOLER_PORT = 6543  # Supabase's Supavisor in transaction mode: session settings don't persist there
 
 # Optional: keep this app's tables in their own schema (tests and shared development projects use
 # this so they never touch the live tables in `public`). Needs a session-mode connection (port 5432
@@ -213,13 +215,46 @@ def _ensure_citext(conn):
     return target
 
 
+def _port(url):
+    from urllib.parse import urlsplit
+    try:
+        return urlsplit(url).port
+    except ValueError:
+        return None
+
+
+def _refuse_transaction_pooler(url):
+    """Schema isolation is a per-connection setting; through a transaction pooler it would silently apply
+    to some statements and not others. Fail loudly instead."""
+    if SCHEMA and _port(url) == TRANSACTION_POOLER_PORT:
+        raise RuntimeError(f"LVAEP_PG_SCHEMA={SCHEMA!r} needs a session-mode connection (port 5432 on Supabase); "
+                           f"DATABASE_URL points at the transaction pooler (port {TRANSACTION_POOLER_PORT}).")
+
+
+def _check_schema(conn):
+    """The connection's current schema; with LVAEP_PG_SCHEMA set it must be that schema or we stop."""
+    schema = conn.execute("SELECT current_schema()").fetchone()[0]
+    if SCHEMA and schema != SCHEMA:
+        raise RuntimeError(f"LVAEP_PG_SCHEMA={SCHEMA!r} is set but this connection is in schema {schema!r} "
+                           "(session settings didn't stick — use a session-mode connection, port 5432 on Supabase).")
+    return schema
+
+
 def _prepare(conn):
     """With LVAEP_PG_SCHEMA set, work in that schema ONLY: `public` is deliberately not on the search path,
-    so nothing in an isolated run can read, and nothing can drop, the live tables."""
+    so nothing in an isolated run can read, and nothing can drop, the live tables. Requires citext to live
+    outside public (it does on Supabase, where this code installs it into `extensions`)."""
     if SCHEMA:
         conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{SCHEMA}"')
         ext = _ensure_citext(conn)
+        if ext == "public":
+            conn.rollback()
+            raise RuntimeError("LVAEP_PG_SCHEMA can't keep `public` off the search path because the citext extension is "
+                               "installed there. Move it first: CREATE SCHEMA IF NOT EXISTS extensions; "
+                               "ALTER EXTENSION citext SET SCHEMA extensions;")
         conn.execute(f'SET search_path TO "{SCHEMA}", "{ext}"')
+        conn.commit()
+        _check_schema(conn)  # a fresh transaction: proves the setting persisted on this connection
         conn.commit()
 
 
@@ -238,6 +273,7 @@ def _get_pool(url):
     global _pool
     with _pool_lock:
         if _pool is None:
+            _refuse_transaction_pooler(url)
             from psycopg_pool import ConnectionPool
 
             _pool = ConnectionPool(_with_ssl(url), min_size=1, max_size=int(os.environ.get("LVAEP_PG_POOL") or "5"),
@@ -250,8 +286,9 @@ def _get_pool(url):
 
 def _refresh_id_tables(conn):
     global _id_tables_loaded
+    schema = _check_schema(conn)
     rows = conn.execute(
-        "SELECT table_name FROM information_schema.columns WHERE table_schema = current_schema() AND column_name = 'id'"
+        "SELECT table_name FROM information_schema.columns WHERE table_schema = %s AND column_name = 'id'", (schema,)
     ).fetchall()
     _tables_with_id.update(r[0] for r in rows)
     _id_tables_loaded = True
@@ -262,11 +299,16 @@ def connect(url):
         pool = _get_pool(url)
         return PgConnection(pool, pool.getconn())
     import psycopg
+    _refuse_transaction_pooler(url)
     conn = psycopg.connect(_with_ssl(url), **CONNECT_KWARGS)
-    _prepare(conn)
-    if not _id_tables_loaded:
-        _refresh_id_tables(conn)
-        conn.commit()
+    try:
+        _prepare(conn)
+        if not _id_tables_loaded:
+            _refresh_id_tables(conn)
+            conn.commit()
+    except BaseException:
+        conn.close()
+        raise
     return PgConnection(None, conn)
 
 
@@ -335,16 +377,19 @@ class PgConnection:
         return PgCursor(cur, wants_id)
 
     def executemany(self, sql, seq):
+        # One execute per row rather than psycopg's pipelined executemany: the batches here are a handful
+        # of rows, and pipeline mode is the one thing not every connection pooler handles.
         pg_sql, _ = translate(sql)
         cur = self._conn.cursor()
-        self._run(lambda: cur.executemany(pg_sql, [tuple(p) for p in seq]))
+        for params in seq:
+            self._run(lambda: cur.execute(pg_sql, tuple(params)))
         return PgCursor(cur, False)
 
     def executescript(self, script):
         """Run a SQLite schema script. Tables and indexes are converted and created only when missing, and
-        new tables are locked against Supabase's Data API. On an up-to-date database this is two cheap
-        SELECTs, so a serverless cold start never takes table locks while other requests are running."""
-        schema = self._conn.execute("SELECT current_schema()").fetchone()[0]
+        new tables are locked against Supabase's Data API. On an up-to-date database this is three cheap
+        catalog SELECTs, so a serverless cold start never takes table locks while other requests run."""
+        schema = _check_schema(self._conn)
         have_tables = {r[0] for r in self._conn.execute(
             "SELECT table_name FROM information_schema.tables WHERE table_schema = %s", (schema,)).fetchall()}
         have_indexes = {r[0] for r in self._conn.execute(
@@ -370,6 +415,7 @@ class PgConnection:
             self._run(lambda: self._conn.execute(pg_sql, ()))
         if created:
             lock_down(self._conn, schema, created)
+        if created or not _tables_with_id:  # another process may have created the tables after our first look
             _refresh_id_tables(self._conn)
         self._conn.commit()
 
@@ -398,28 +444,27 @@ class PgConnection:
 
 
 def lock_down(conn, schema, tables):
-    """Turn on row-level security with no policies, so Supabase's anon/authenticated API keys
-    can't read or change these tables. The app connects as the owner, which RLS doesn't restrict."""
+    """Turn on row-level security with no policies, so Supabase's anon/authenticated API keys can't read
+    or change these tables (and revoke their grants on exactly these tables and their id sequences — never
+    on other applications' tables in the same schema). The app connects as the owner, which RLS doesn't
+    restrict."""
+    roles = [r[0] for r in conn.execute(
+        "SELECT rolname FROM pg_roles WHERE rolname IN ('anon', 'authenticated')").fetchall()]
     for t in tables:
         conn.execute(f'ALTER TABLE "{schema}"."{t}" ENABLE ROW LEVEL SECURITY')
-    conn.execute(
-        f"""DO $$ DECLARE r text; BEGIN
-             FOREACH r IN ARRAY ARRAY['anon', 'authenticated'] LOOP
-               IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
-                 EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA %I FROM %I', '{schema}', r);
-                 EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I FROM %I', '{schema}', r);
-               END IF;
-             END LOOP; END $$;"""
-    )
+        has_id = conn.execute("SELECT 1 FROM information_schema.columns WHERE table_schema = %s AND table_name = %s "
+                              "AND column_name = 'id'", (schema, t)).fetchone()
+        seq = conn.execute("SELECT pg_get_serial_sequence(%s, 'id')", (f'"{schema}"."{t}"',)).fetchone()[0] if has_id else None
+        for r in roles:
+            conn.execute(f'REVOKE ALL ON TABLE "{schema}"."{t}" FROM "{r}"')
+            if seq:
+                conn.execute(f'REVOKE ALL ON SEQUENCE {seq} FROM "{r}"')
 
 
 def drop_tables(conn, tables):
     """Drop the app's tables in the connection's current schema only — names are schema-qualified so an
     unqualified DROP can never resolve through the search path to the live tables in public."""
-    schema = conn.execute("SELECT current_schema()").fetchone()[0]
-    if SCHEMA and schema != SCHEMA:
-        raise RuntimeError(f"Refusing to drop tables: the connection is in schema {schema!r}, not LVAEP_PG_SCHEMA="
-                           f"{SCHEMA!r}. Use a session-mode connection (port 5432 on Supabase).")
+    schema = _check_schema(conn)
     existing = {r[0] for r in conn.execute(
         "SELECT table_name FROM information_schema.tables WHERE table_schema = %s", (schema,)).fetchall()}
     for t in tables:

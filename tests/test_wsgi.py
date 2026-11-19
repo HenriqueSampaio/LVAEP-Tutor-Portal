@@ -253,6 +253,21 @@ class WsgiTest(unittest.TestCase):
             conn.close()
         self.assertEqual((second, runs), (0, 1))
 
+    def test_17_init_dedupes_old_duplicate_reminder_runs_before_building_the_unique_index(self):
+        conn = db.connect()
+        try:
+            conn.execute("DROP INDEX IF EXISTS idx_reminder_runs_auto")
+            for _ in range(2):
+                conn.execute("INSERT INTO reminder_runs (kind, period_key, recipients, triggered_by) VALUES ('month_end', '2020-01', 3, NULL)")
+            conn.commit()
+            db.init(conn)  # must not fail: keeps one row and recreates the index
+            rows = conn.execute("SELECT COUNT(*) AS c FROM reminder_runs WHERE period_key = '2020-01'").fetchone()["c"]
+            idx = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_reminder_runs_auto'").fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(rows, 1)
+        self.assertIsNotNone(idx)
+
 
 class BootstrapAdminTest(unittest.TestCase):
     """bootstrap_admin.py is how the live site gets its first (real) login."""
