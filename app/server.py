@@ -127,23 +127,41 @@ def staff_ids(conn):
 
 # ---------- auth ----------
 
-LOGIN_MAX_FAILURES, LOGIN_WINDOW_MINUTES = 10, 15  # per email address; slows down password guessing
+# Sign-in throttle: a hard limit per (email, client address) so a stranger can't lock a tutor out from
+# afar, plus a wider limit per email across all addresses to slow distributed guessing.
+LOGIN_MAX_FAILURES, LOGIN_WINDOW_MINUTES = 10, 15
+LOGIN_MAX_FAILURES_ANY_ADDRESS = 60
+_DUMMY_HASH = db.hash_password(secrets.token_hex(16))  # unknown email and wrong password take the same time
+
+
+def client_ip(headers):
+    fwd = (headers.get("X-Forwarded-For") or "").split(",")[0].strip()  # Vercel sets this to the real client
+    return fwd or (headers.get("X-Real-IP") or "").strip() or "local"
+
+
+def _like_escape(value):
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 @route("POST", "/api/login", auth=False)
 def login(ctx):
-    need(ctx.body, "email", "password")
-    email = ctx.body["email"].strip()
+    email, password = ctx.body.get("email"), ctx.body.get("password")
+    if not isinstance(email, str) or not isinstance(password, str) or not email.strip() or not password:
+        raise ApiError(400, "Enter your email and password.")
+    email = email.strip()
+    if len(email) > 254 or email.count("@") != 1 or " " in email:
+        raise ApiError(400, "Enter a valid email address.")
+    key = f"{email.lower()}|{client_ip(ctx.headers)}"
     since = (db.now() - dt.timedelta(minutes=LOGIN_WINDOW_MINUTES)).replace(microsecond=0).isoformat(sep=" ")
-    failures = ctx.conn.execute(
-        "SELECT COUNT(*) AS c FROM audit_log WHERE action = 'login.failed' AND detail = ? AND created_at > ?",
-        (email.lower(), since)).fetchone()["c"]
-    if failures >= LOGIN_MAX_FAILURES:
-        raise ApiError(429, f"Too many sign-in attempts. Wait {LOGIN_WINDOW_MINUTES} minutes and try again, "
-                            "or use “Forgot your password?”.")
+    recent = [r["detail"] for r in ctx.conn.execute(
+        "SELECT detail FROM audit_log WHERE action = 'login.failed' AND created_at > ? AND detail LIKE ? ESCAPE '\\'",
+        (since, _like_escape(email.lower()) + "|%"))]
+    if recent.count(key) >= LOGIN_MAX_FAILURES or len(recent) >= LOGIN_MAX_FAILURES_ANY_ADDRESS:
+        how = "use “Forgot your password?”" if mailer.mode() == "resend" else "ask LVAEP staff for a temporary password"
+        raise ApiError(429, f"Too many sign-in attempts. Wait {LOGIN_WINDOW_MINUTES} minutes and try again, or {how}.")
     u = ctx.conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
-    if not u or not db.check_password(ctx.body["password"], u["password_hash"]):
-        db.audit(ctx.conn, None, "login.failed", email.lower())
+    if not db.check_password(password, u["password_hash"] if u else _DUMMY_HASH) or not u:
+        db.audit(ctx.conn, None, "login.failed", key)
         ctx.conn.commit()  # keep the failed attempt even though the request ends in an error
         raise ApiError(401, "That email and password don't match an account.")
     if not u["active"]:
@@ -185,6 +203,9 @@ def change_password(ctx):
         raise ApiError(400, "Choose a password with at least 8 characters.")
     ctx.conn.execute("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?",
                      (db.hash_password(ctx.body["new"]), ctx.user["id"]))
+    # Sign out every other device (tutors often use shared library computers); keep this session.
+    ctx.conn.execute("DELETE FROM auth_tokens WHERE user_id = ? AND token != ?", (ctx.user["id"], ctx.token))
+    db.audit(ctx.conn, ctx.user["id"], "account.password_change", "other sessions signed out")
     return {"ok": True}
 
 
@@ -194,7 +215,9 @@ def meta(ctx):
             "achievement_groups": [{"heading": h, "items": items} for h, items in db.ACHIEVEMENT_GROUPS],
             "today": db.today().isoformat(), "weekly_target": db.WEEKLY_TARGET_HOURS,
             # The sign-in page only offers the one-click demo accounts when the synthetic demo data is loaded.
-            "demo": db.has_demo_data(ctx.conn)}
+            "demo": db.has_demo_data(ctx.conn),
+            # Whether emails actually go out (reset links, invitations); otherwise the UI points people to staff.
+            "email_enabled": mailer.mode() == "resend"}
 
 
 # ---------- notifications ----------
@@ -371,8 +394,8 @@ def _validate_session(ctx, body, tutor_id, student_id, existing_id=None):
     return date.isoformat(), attendance, tut, hw, (body.get("note") or "")[:500]
 
 
-def _session_audit(ctx, action, tutor_id, student_id, date):
-    if ctx.is_staff:
+def _session_audit(ctx, action, tutor_id, student_id, date, always=False):
+    if ctx.is_staff or always:
         t, s = names(ctx.conn, tutor_id, student_id)
         db.audit(ctx.conn, ctx.user["id"], action, f"{t} / {s} / {date}")
 
@@ -418,7 +441,7 @@ def session_update(ctx):
 def session_delete(ctx):
     s = _load_session(ctx)
     ctx.conn.execute("DELETE FROM sessions WHERE id = ?", (s["id"],))
-    _session_audit(ctx, "session.delete", s["tutor_id"], s["student_id"], s["date"])
+    _session_audit(ctx, "session.delete", s["tutor_id"], s["student_id"], s["date"], always=True)  # hours vanishing is always logged
     return {"ok": True}
 
 
@@ -512,10 +535,14 @@ def _validate_event(ctx, body, tutor_id, existing_id=0):
     except (TypeError, ValueError):
         raise ApiError(400, "Student ids must be numbers.")
     for sid in student_ids:
+        covered = db.assignment_covers(ctx.conn, tutor_id, sid, date.isoformat())
+        if not ctx.is_staff and not covered:
+            # One message for "not yours" and "doesn't exist": tutors must not be able to probe the roster.
+            raise ApiError(400, "One of the selected students isn't assigned to you on that date.")
         s = ctx.conn.execute("SELECT first_name || ' ' || last_name AS n FROM students WHERE id = ?", (sid,)).fetchone()
         if not s:
             raise ApiError(404, "Student not found.")
-        if not db.assignment_covers(ctx.conn, tutor_id, sid, date.isoformat()):
+        if not covered:
             raise ApiError(400, f"{s['n']} isn't assigned to this tutor on {date:%b} {date.day}.")
     if ctx.is_staff:
         tutor = ctx.conn.execute("SELECT active FROM users WHERE id = ?", (tutor_id,)).fetchone()
@@ -987,7 +1014,7 @@ def staff_reminder_run(ctx):
 def staff_activity(ctx):
     rows = ctx.conn.execute(
         """SELECT l.*, u.name AS user_name FROM audit_log l LEFT JOIN users u ON u.id = l.user_id
-           ORDER BY l.id DESC LIMIT 200""").fetchall()
+           WHERE l.action != 'login.failed' ORDER BY l.id DESC LIMIT 200""").fetchall()  # failed sign-ins would drown it
     return {"items": [dict(r) for r in rows]}
 
 
@@ -1038,7 +1065,8 @@ def cron_daily(ctx):
     `Authorization: Bearer $CRON_SECRET`; without a matching secret the request is refused."""
     secret = os.environ.get("CRON_SECRET", "").strip()
     given = (ctx.headers.get("Authorization") or "").strip()
-    if not secret or not hmac.compare_digest(given, f"Bearer {secret}"):
+    if not secret or not hmac.compare_digest(given.encode("utf-8", "surrogateescape"),
+                                             f"Bearer {secret}".encode("utf-8", "surrogateescape")):
         raise ApiError(401, "Unauthorized.")
     ctx.conn.commit()
     sent = reminders.run_scheduled(ctx.conn)
@@ -1111,6 +1139,14 @@ def cookie_header(value, secure):
 
 def handle(method, raw_path, headers, body=b""):
     """Answer one HTTP request: returns a Response. `headers` is a Headers, `body` the raw bytes."""
+    lookup = "GET" if method == "HEAD" else method
+    resp = _dispatch(lookup, raw_path, headers, body)
+    if method == "HEAD":
+        resp.body = b""  # same status and headers (including Content-Length) as the GET, no body
+    return resp
+
+
+def _dispatch(method, raw_path, headers, body):
     url = urlparse(raw_path)
     path = url.path
     if method == "GET" and not (path.startswith("/api/") or path.startswith("/export/") or path == "/print"):
@@ -1122,7 +1158,12 @@ def handle(method, raw_path, headers, body=b""):
     return Response(404, json.dumps({"error": "Not found."}))
 
 
+# With a temporary password, only these work until the person has chosen their own password.
+PASSWORD_SETUP_PATHS = {"/api/me", "/api/me/password", "/api/logout"}
+
+
 def run_route(fn, role, auth, params, query, method, path, headers, body_bytes):
+    mailer.begin_request()
     conn = db.connect()
     try:
         body = {}
@@ -1148,11 +1189,13 @@ def run_route(fn, role, auth, params, query, method, path, headers, body_bytes):
             raise ApiError(401, "Please sign in.")
         if role and user["role"] != role:
             raise ApiError(403, "You don't have access to this page.")
+        if auth and user["must_change_password"] and path not in PASSWORD_SETUP_PATHS:
+            raise ApiError(403, "Please choose your own password first.", must_change_password=True)
         ctx = Ctx(conn, user, params, query, body)
         ctx.token, ctx.set_cookie, ctx.headers = token, None, headers
         result = fn(ctx)
         conn.commit()
-        if INLINE_MAIL and mailer.has_queued():
+        if INLINE_MAIL and (mailer.queued_in_request() or mailer.has_queued()):
             try:
                 mailer.deliver_pending(conn, limit=25)
             except Exception:  # the action itself succeeded; delivery is retried by the daily job

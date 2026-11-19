@@ -60,7 +60,8 @@ def check_database():
             else "Row-level security is on for every table.")
         users = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
         say(OK if users else WARN, f"{users} account(s)." if users else
-            "No accounts yet — run `python3 server.py --empty` once to create the first staff login.")
+            "No accounts yet — create the first staff login with "
+            "`python3 bootstrap_admin.py --name \"Full Name\" --email you@example.org`.")
     finally:
         conn.close()
     url, key = os.environ.get("SUPABASE_URL", "").rstrip("/"), os.environ.get("SUPABASE_PUBLISHABLE_KEY", "")

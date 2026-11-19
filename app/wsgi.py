@@ -4,11 +4,12 @@ hosts the daily job at /api/cron/daily runs the reminder schedule and sends queu
 
     from app.wsgi import app
 """
+import html
 import json
 import traceback
 from http import HTTPStatus
 
-from . import server
+from . import db, server
 
 
 def application(environ, start_response):
@@ -30,11 +31,18 @@ def application(environ, start_response):
         if path.startswith("/api/") or path.startswith("/export/") or path == "/print":
             server.ensure_initialized()  # static files never need the database
         resp = server.handle(method, raw_path, server.Headers(headers.items()), body)
-    except Exception:  # database unreachable or misconfigured: say so, instead of the host's generic error page
+    except Exception as exc:  # say what happened instead of the host's generic error page
         traceback.print_exc()
-        resp = server.Response(503, json.dumps({"error": "The site's database isn't reachable right now. "
-                                                         "Please try again in a minute."}),
-                               headers={"Retry-After": "60"})
+        down = db.is_connection_error(exc)
+        status = 503 if down else 500
+        message = ("The site's database isn't reachable right now. Please try again in a minute." if down
+                   else "Something went wrong on the server.")
+        extra = {"Retry-After": "60"} if down else None
+        if path.startswith("/print") or path.startswith("/export"):  # these open in a browser tab
+            resp = server.Response(status, f"<p style='font-family:sans-serif'>{html.escape(message)} "
+                                           "<a href='/'>Back to the app</a></p>", "text/html; charset=utf-8", extra)
+        else:
+            resp = server.Response(status, json.dumps({"error": message}), headers=extra)
     try:
         phrase = HTTPStatus(resp.status).phrase
     except ValueError:

@@ -200,10 +200,26 @@ def _with_ssl(url):
     return url + ("&" if "?" in url else "?") + "sslmode=require"
 
 
+def _ensure_citext(conn):
+    """Install the citext extension (case-insensitive text) where it belongs — Supabase keeps extensions
+    in its `extensions` schema, which its Data API doesn't expose; plain Postgres uses public — and return
+    the schema it lives in."""
+    row = conn.execute("SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace "
+                       "WHERE e.extname = 'citext'").fetchone()
+    if row:
+        return row[0]
+    target = "extensions" if conn.execute("SELECT 1 FROM pg_namespace WHERE nspname = 'extensions'").fetchone() else "public"
+    conn.execute(f'CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA "{target}"')
+    return target
+
+
 def _prepare(conn):
+    """With LVAEP_PG_SCHEMA set, work in that schema ONLY: `public` is deliberately not on the search path,
+    so nothing in an isolated run can read, and nothing can drop, the live tables."""
     if SCHEMA:
         conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{SCHEMA}"')
-        conn.execute(f'SET search_path TO "{SCHEMA}", public, extensions')
+        ext = _ensure_citext(conn)
+        conn.execute(f'SET search_path TO "{SCHEMA}", "{ext}"')
         conn.commit()
 
 
@@ -325,19 +341,35 @@ class PgConnection:
         return PgCursor(cur, False)
 
     def executescript(self, script):
-        """Run a SQLite schema script: tables are converted and then locked against the Data API."""
-        self._conn.execute("CREATE EXTENSION IF NOT EXISTS citext")
-        created = []
+        """Run a SQLite schema script. Tables and indexes are converted and created only when missing, and
+        new tables are locked against Supabase's Data API. On an up-to-date database this is two cheap
+        SELECTs, so a serverless cold start never takes table locks while other requests are running."""
+        schema = self._conn.execute("SELECT current_schema()").fetchone()[0]
+        have_tables = {r[0] for r in self._conn.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = %s", (schema,)).fetchall()}
+        have_indexes = {r[0] for r in self._conn.execute(
+            "SELECT indexname FROM pg_indexes WHERE schemaname = %s", (schema,)).fetchall()}
+        created, todo = [], []
         for stmt in _split_script(script):
             if _PRAGMA.match(stmt):
                 continue
             m = re.match(r"^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)", stmt, re.I)
             if m:
+                if m.group(1).lower() in have_tables:
+                    continue
                 created.append(m.group(1).lower())
+            else:
+                mi = re.match(r"^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)", stmt, re.I)
+                if mi and mi.group(1).lower() in have_indexes:
+                    continue
+            todo.append(stmt)
+        if created:
+            _ensure_citext(self._conn)
+        for stmt in todo:
             pg_sql, _ = translate(stmt)
             self._run(lambda: self._conn.execute(pg_sql, ()))
         if created:
-            lock_down(self._conn, created)
+            lock_down(self._conn, schema, created)
             _refresh_id_tables(self._conn)
         self._conn.commit()
 
@@ -365,23 +397,32 @@ class PgConnection:
         self.close()
 
 
-def lock_down(conn, tables):
+def lock_down(conn, schema, tables):
     """Turn on row-level security with no policies, so Supabase's anon/authenticated API keys
     can't read or change these tables. The app connects as the owner, which RLS doesn't restrict."""
     for t in tables:
-        conn.execute(f'ALTER TABLE "{t}" ENABLE ROW LEVEL SECURITY')
+        conn.execute(f'ALTER TABLE "{schema}"."{t}" ENABLE ROW LEVEL SECURITY')
     conn.execute(
-        """DO $$ DECLARE r text; BEGIN
+        f"""DO $$ DECLARE r text; BEGIN
              FOREACH r IN ARRAY ARRAY['anon', 'authenticated'] LOOP
                IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
-                 EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA public FROM %I', r);
-                 EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM %I', r);
+                 EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA %I FROM %I', '{schema}', r);
+                 EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I FROM %I', '{schema}', r);
                END IF;
              END LOOP; END $$;"""
     )
 
 
 def drop_tables(conn, tables):
+    """Drop the app's tables in the connection's current schema only — names are schema-qualified so an
+    unqualified DROP can never resolve through the search path to the live tables in public."""
+    schema = conn.execute("SELECT current_schema()").fetchone()[0]
+    if SCHEMA and schema != SCHEMA:
+        raise RuntimeError(f"Refusing to drop tables: the connection is in schema {schema!r}, not LVAEP_PG_SCHEMA="
+                           f"{SCHEMA!r}. Use a session-mode connection (port 5432 on Supabase).")
+    existing = {r[0] for r in conn.execute(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = %s", (schema,)).fetchall()}
     for t in tables:
-        conn.execute(f'DROP TABLE IF EXISTS "{t}" CASCADE')
+        if t in existing:
+            conn.execute(f'DROP TABLE IF EXISTS "{schema}"."{t}" CASCADE')
     conn.commit()

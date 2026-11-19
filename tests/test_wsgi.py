@@ -43,7 +43,7 @@ def call(method, path, body=None, headers=None, cookie=None):
 
     raw = b"".join(wsgi.app(environ, start_response))
     ctype = dict(out["headers"]).get("Content-Type", "")
-    return out["status"], (json.loads(raw) if "json" in ctype else raw.decode()), dict(out["headers"])
+    return out["status"], (json.loads(raw) if "json" in ctype and raw else raw.decode()), dict(out["headers"])
 
 
 def login(email, password=seed.DEMO_PASSWORD, **kw):
@@ -111,6 +111,10 @@ class WsgiTest(unittest.TestCase):
         invite = [e for e in log["items"] if e["to_email"] == "sue@tutors.example" and e["kind"] == "invite"][0]
         self.assertEqual(invite["status"], "saved")  # handled at the end of the request, no worker thread
         self.assertNotIn("html", invite)
+        conn = db.connect()
+        stored = conn.execute("SELECT html, text FROM email_outbox WHERE id = ?", (invite["id"],)).fetchone()
+        conn.close()
+        self.assertNotRegex(stored["html"] + stored["text"], r"token=[A-Za-z0-9_-]{20,}")  # no working link kept in the database
         status, page, headers = call("GET", f"/api/staff/emails/{invite['id']}/preview", cookie=self.staff_cookie)
         self.assertEqual(status, 200)
         self.assertIn("text/html", headers["Content-Type"])
@@ -146,6 +150,108 @@ class WsgiTest(unittest.TestCase):
         expected = dt.datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
         self.assertLess(abs((db.now() - expected).total_seconds()), 5)
         self.assertRegex(db.now_iso(), r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
+    def test_09_head_requests_mirror_get_without_a_body(self):
+        status, body, headers = call("HEAD", "/")
+        self.assertEqual((status, body), (200, ""))
+        self.assertIn("text/html", headers["Content-Type"])
+        self.assertGreater(int(headers["Content-Length"]), 100)
+        status, body, headers = call("HEAD", "/api/meta")
+        self.assertEqual((status, body), (200, ""))
+        self.assertIn("json", headers["Content-Type"])
+
+    def test_10_cron_rejects_odd_secrets_cleanly(self):
+        with mock.patch.dict(os.environ, {"CRON_SECRET": "s3cret"}):
+            self.assertEqual(call("GET", "/api/cron/daily", headers={"Authorization": "Bearer s\xe9cret"})[0], 401)
+
+    def test_11_temporary_password_only_opens_the_password_page(self):
+        status, body, _ = call("POST", "/api/staff/tutors", {"name": "Temp Tina", "email": "tina@tutors.example",
+                                                              "training_hours": 12}, cookie=self.staff_cookie)
+        self.assertEqual(status, 200, body)
+        temp = body["temp_password"]
+        cookie, _ = login("tina@tutors.example", temp)
+        status, err, _ = call("GET", "/api/tutor/home", cookie=cookie)
+        self.assertEqual((status, err.get("must_change_password")), (403, True))
+        self.assertEqual(call("GET", "/api/calendar?start=2026-10-01&end=2026-10-31", cookie=cookie)[0], 403)
+        self.assertEqual(call("GET", "/api/me", cookie=cookie)[0], 200)
+        self.assertEqual(call("POST", "/api/me/password", {"current": temp, "new": "tina-new-pass"}, cookie=cookie)[0], 200)
+        self.assertEqual(call("GET", "/api/tutor/home", cookie=cookie)[0], 200)
+
+    def test_12_login_input_is_validated_before_anything_is_recorded(self):
+        def audit_rows():
+            conn = db.connect()
+            try:
+                return conn.execute("SELECT COUNT(*) AS c FROM audit_log").fetchone()["c"]
+            finally:
+                conn.close()
+        before = audit_rows()
+        self.assertEqual(call("POST", "/api/login", {"email": ["x"], "password": "y"})[0], 400)
+        self.assertEqual(call("POST", "/api/login", {"email": "a" * 300 + "@x.example", "password": "y"})[0], 400)
+        self.assertEqual(call("POST", "/api/login", {"email": "no-at-sign", "password": "y"})[0], 400)
+        self.assertEqual(call("POST", "/api/login", {"email": "x@y.example", "password": 5})[0], 400)
+        self.assertEqual(audit_rows(), before)
+        self.assertEqual(call("POST", "/api/login", {"email": "ghost@y.example", "password": "nope"})[0], 401)
+        self.assertEqual(audit_rows(), before + 1)
+        # Failed sign-ins are kept but don't clutter the staff Activity log.
+        status, log, _ = call("GET", "/api/staff/activity", cookie=self.staff_cookie)
+        self.assertEqual(status, 200)
+        self.assertFalse([i for i in log["items"] if i["action"] == "login.failed"])
+
+    def test_13_changing_the_password_signs_out_other_devices(self):
+        _, body, _ = call("POST", "/api/staff/tutors", {"name": "Library Lou", "email": "lou@tutors.example",
+                                                         "training_hours": 12}, cookie=self.staff_cookie)
+        temp = body["temp_password"]
+        c1, _ = login("lou@tutors.example", temp)
+        self.assertEqual(call("POST", "/api/me/password", {"current": temp, "new": "lou-first-pass"}, cookie=c1)[0], 200)
+        c2, _ = login("lou@tutors.example", "lou-first-pass")
+        self.assertEqual(call("GET", "/api/me", cookie=c2)[0], 200)
+        self.assertEqual(call("POST", "/api/me/password", {"current": "lou-first-pass", "new": "lou-second-pass"},
+                              cookie=c1)[0], 200)
+        self.assertEqual(call("GET", "/api/me", cookie=c1)[0], 200)  # the device that changed it stays signed in
+        self.assertEqual(call("GET", "/api/me", cookie=c2)[0], 401)  # the other (shared library computer) is out
+
+    def test_14_tutors_cannot_learn_other_students_names_from_calendar_errors(self):
+        _, owner, _ = call("POST", "/api/staff/tutors", {"name": "Owner Olga", "email": "olga@tutors.example",
+                                                          "training_hours": 12}, cookie=self.staff_cookie)
+        _, nosy, _ = call("POST", "/api/staff/tutors", {"name": "Nosy Nick", "email": "nick@tutors.example",
+                                                         "training_hours": 12}, cookie=self.staff_cookie)
+        _, student, _ = call("POST", "/api/staff/students", {"first_name": "Secret", "last_name": "Surname",
+                                                              "enrolled_on": "2026-06-01"}, cookie=self.staff_cookie)
+        status, body, _ = call("POST", "/api/staff/assignments", {"tutor_id": owner["id"], "student_id": student["id"],
+                                                                   "start_date": "2026-07-01"}, cookie=self.staff_cookie)
+        self.assertEqual(status, 200, body)
+        nick, _ = login("nick@tutors.example", nosy["temp_password"])
+        call("POST", "/api/me/password", {"current": nosy["temp_password"], "new": "nick-pass-123"}, cookie=nick)
+        event = {"date": os.environ["LVAEP_TODAY"], "start_time": "10:00", "end_time": "11:00"}
+        status, err, _ = call("POST", "/api/calendar", {**event, "student_ids": [student["id"]]}, cookie=nick)
+        self.assertEqual(status, 400)
+        self.assertNotIn("Secret", err["error"])
+        self.assertNotIn("Surname", err["error"])
+        status2, err2, _ = call("POST", "/api/calendar", {**event, "student_ids": [999999]}, cookie=nick)
+        self.assertEqual((status2, err2["error"]), (400, err["error"]))  # "not yours" and "doesn't exist" look the same
+
+    def test_15_csv_cells_cannot_run_as_spreadsheet_formulas(self):
+        from app import exports
+        self.assertEqual(exports._cell('=HYPERLINK("http://evil.example")'), "'=HYPERLINK(\"http://evil.example\")")
+        self.assertEqual(exports._cell("+1"), "'+1")
+        self.assertEqual(exports._cell("-5 min late"), "'-5 min late")
+        self.assertEqual(exports._cell("@cmd"), "'@cmd")
+        self.assertEqual(exports._cell("normal note"), "normal note")
+        self.assertEqual(exports._cell(2.5), 2.5)
+        self.assertEqual(exports._cell("a\x00b\tc"), "abc")
+
+    def test_16_automatic_reminders_fire_once_even_when_called_twice(self):
+        from app import reminders
+        conn = db.connect()
+        try:
+            month = os.environ["LVAEP_TODAY"][:7]
+            reminders.send_month_reminders(conn, month, "month_end")
+            second = reminders.send_month_reminders(conn, month, "month_end")
+            runs = conn.execute("SELECT COUNT(*) AS c FROM reminder_runs WHERE kind = 'month_end' AND period_key = ? "
+                                "AND triggered_by IS NULL", (month,)).fetchone()["c"]
+        finally:
+            conn.close()
+        self.assertEqual((second, runs), (0, 1))
 
 
 class BootstrapAdminTest(unittest.TestCase):

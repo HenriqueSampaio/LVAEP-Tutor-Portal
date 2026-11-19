@@ -27,7 +27,29 @@ def tutors_missing_report(conn, month):
     return missing
 
 
+def _claim(conn, kind, period_key):
+    """Record an automatic run BEFORE notifying anyone. A partial unique index (one automatic run per kind
+    and period) makes this atomic, so two overlapping runs — the host's cron firing twice, or a cron and a
+    staff click — can't both send. Returns False if the period was already claimed."""
+    cur = conn.execute("INSERT OR IGNORE INTO reminder_runs (kind, period_key, recipients, triggered_by) VALUES (?, ?, 0, NULL)",
+                       (kind, period_key))
+    claimed = cur.rowcount == 1
+    conn.commit()
+    return claimed
+
+
+def _record(conn, kind, period_key, recipients, triggered_by):
+    if triggered_by is None:
+        conn.execute("UPDATE reminder_runs SET recipients = ? WHERE kind = ? AND period_key = ? AND triggered_by IS NULL",
+                     (recipients, kind, period_key))
+    else:
+        conn.execute("INSERT INTO reminder_runs (kind, period_key, recipients, triggered_by) VALUES (?, ?, ?, ?)",
+                     (kind, period_key, recipients, triggered_by))
+
+
 def send_month_reminders(conn, month, kind, triggered_by=None):
+    if triggered_by is None and not _claim(conn, kind, month):
+        return 0
     label = db.month_bounds(month)[0].strftime("%B")
     missing = tutors_missing_report(conn, month)
     for tutor_id, students in missing.items():
@@ -39,14 +61,15 @@ def send_month_reminders(conn, month, kind, triggered_by=None):
         else:
             msg = f"It's the last day of {label} — don't forget to submit your hours for: {names}."
         db.notify(conn, tutor_id, kind, msg, link=f"#/tutor?month={month}")
-    conn.execute(
-        "INSERT INTO reminder_runs (kind, period_key, recipients, triggered_by) VALUES (?, ?, ?, ?)",
-        (kind, month, len(missing), triggered_by),
-    )
+    _record(conn, kind, month, len(missing), triggered_by)
     return len(missing)
 
 
 def send_weekly_reminders(conn, today):
+    iso = today.isocalendar()
+    week_key = f"{iso[0]}-W{iso[1]:02d}"
+    if not _claim(conn, "weekly", week_key):
+        return 0
     since = (today - dt.timedelta(days=7)).isoformat()
     month = today.strftime("%Y-%m")
     count = 0
@@ -60,11 +83,7 @@ def send_weekly_reminders(conn, today):
                       "You haven't logged any sessions this week. Add this week's hours when you have a minute.",
                       link=f"#/tutor?month={month}")
             count += 1
-    iso = today.isocalendar()
-    conn.execute(
-        "INSERT INTO reminder_runs (kind, period_key, recipients) VALUES ('weekly', ?, ?)",
-        (f"{iso[0]}-W{iso[1]:02d}", count),
-    )
+    _record(conn, "weekly", week_key, count, None)
     return count
 
 

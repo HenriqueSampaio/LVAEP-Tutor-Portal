@@ -84,8 +84,15 @@ SUBJECTS = {
 }
 
 paused = False  # set while loading demo data, so seeding doesn't queue emails
-_wake = threading.Event()
+_wake = threading.Event()       # wakes the background worker (long-running server)
+_local = threading.local()      # "this request queued an email" (serverless: deliver before answering)
 _worker = None
+SECRET_LINK = re.compile(r"token=[\w-]+")
+
+
+def _redact(text):
+    """Blank the one-time sign-in token in a stored email body (kept only until the email has gone out)."""
+    return SECRET_LINK.sub("token=" + "•" * 12, text or "")
 
 
 # ---------- configuration ----------
@@ -106,7 +113,11 @@ def mode():
 
 
 def app_url():
-    return os.environ.get("APP_URL", "http://localhost:8070").rstrip("/")
+    url = os.environ.get("APP_URL", "").strip()
+    if not url:  # on Vercel, fall back to the project's production address
+        host = (os.environ.get("VERCEL_PROJECT_PRODUCTION_URL") or os.environ.get("VERCEL_URL") or "").strip()
+        url = f"https://{host}" if host else "http://localhost:8070"
+    return url.rstrip("/")
 
 
 def sender():
@@ -169,6 +180,16 @@ def queue(conn, *, kind, to_email, to_name, subject, html_body, text_body, user_
         (user_id, notification_id, kind, to_email, to_name or "", subject, html_body, text_body),
     )
     _wake.set()
+    _local.queued = True
+
+
+def begin_request():
+    """Called at the start of every request so the per-request flag never leaks between requests."""
+    _local.queued = False
+
+
+def queued_in_request():
+    return getattr(_local, "queued", False)
 
 
 def queue_notification(conn, notification_id, user_id, kind, message, link=""):
@@ -233,6 +254,7 @@ def deliver_pending(conn=None, limit=50):
     conn = conn or db.connect()
     handled = 0
     _wake.clear()
+    _local.queued = False
     try:
         rows = conn.execute(
             """SELECT * FROM email_outbox WHERE status = 'queued' OR (status = 'failed' AND attempts < ?)
@@ -242,6 +264,13 @@ def deliver_pending(conn=None, limit=50):
             _wake.set()
         m = mode()
         for row in rows:
+            # Claim this attempt first: a concurrent request or the daily job may be delivering the same
+            # queue. The attempt counter doubles as an optimistic lock, so exactly one of them sends.
+            claimed = conn.execute("UPDATE email_outbox SET attempts = attempts + 1 WHERE id = ? AND attempts = ?",
+                                   (row["id"], row["attempts"])).rowcount
+            conn.commit()
+            if claimed != 1:
+                continue
             to_email, to_name, subject, body = row["to_email"], row["to_name"], row["subject"], row["html"]
             redirect = redirect_to()
             domain = to_email.rsplit("@", 1)[-1]
@@ -264,10 +293,14 @@ def deliver_pending(conn=None, limit=50):
                     provider_id = _send_resend(to_email, to_name, subject, body, row["text"])
             except Exception as e:  # network or provider error: retry later
                 status, error = "failed", str(e)[:500]
+            # Once an invitation / reset email is out (or won't be sent), stop storing its working link.
+            keep = status == "failed" or row["kind"] not in ("invite", "reset")
             conn.execute(
-                """UPDATE email_outbox SET status = ?, attempts = attempts + 1, last_error = ?, provider_id = ?,
-                   sent_at = CASE WHEN ? IN ('sent', 'saved') THEN ? ELSE sent_at END WHERE id = ?""",
-                (status, error, provider_id, status, db.now_iso(), row["id"]))
+                """UPDATE email_outbox SET status = ?, last_error = ?, provider_id = ?,
+                   sent_at = CASE WHEN ? IN ('sent', 'saved') THEN ? ELSE sent_at END,
+                   html = ?, text = ? WHERE id = ?""",
+                (status, error, provider_id, status, db.now_iso(),
+                 row["html"] if keep else _redact(row["html"]), row["text"] if keep else _redact(row["text"]), row["id"]))
             if row["notification_id"]:
                 conn.execute("UPDATE notifications SET email_status = ? WHERE id = ?", (status, row["notification_id"]))
             conn.commit()

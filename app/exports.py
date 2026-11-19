@@ -12,9 +12,29 @@ def _hours(x):
     return f"{x:g}" if x else "0"
 
 
+def _cell(value):
+    """Free text goes into spreadsheets: a value starting with = + - @ (or a tab/CR) would be run as a
+    formula by Excel or Google Sheets ("CSV injection"), so prefix it with an apostrophe."""
+    if isinstance(value, str):
+        value = "".join(ch for ch in value if ch >= " " or ch == "\n")
+        if value[:1] in ("=", "+", "-", "@"):
+            return "'" + value
+    return value
+
+
+class _Writer:
+    """csv.writer that neutralises formulas in every cell."""
+
+    def __init__(self, out):
+        self._w = csv.writer(out)
+
+    def writerow(self, row):
+        self._w.writerow([_cell(v) for v in row])
+
+
 def sessions_csv(conn, month):
     out = io.StringIO()
-    w = csv.writer(out)
+    w = _Writer(out)
     w.writerow(["Month", "Tutor", "Student", "Meeting place", "Days/times", "Date", "Attendance",
                 "Tutoring hours", "Homework hours", "Total hours", "Note", "Report status"])
     for a in db.active_assignments(conn, month):
@@ -29,7 +49,7 @@ def sessions_csv(conn, month):
 
 def summary_csv(conn, month):
     out = io.StringIO()
-    w = csv.writer(out)
+    w = _Writer(out)
     fy = db.fiscal_year_label(month)
     w.writerow(["Month", "Tutor", "Student", "Program", "Meeting place", "Days/times", "Report status",
                 "Submitted at", "Sessions attended", "Tutoring hours", "Homework hours", "Total hours",

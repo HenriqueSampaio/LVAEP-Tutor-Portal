@@ -7,6 +7,7 @@
 """
 import argparse
 import os
+import secrets
 import sys
 
 from app import env
@@ -37,11 +38,15 @@ def main():
     if db.is_empty(conn):
         mailer.paused = True  # demo data shouldn't queue emails
         if args.empty:
+            if db.using_postgres():  # a hosted database may be the live one: no placeholder logins there
+                sys.exit("On a Postgres database the first (real) staff login is created with\n"
+                         "    python3 bootstrap_admin.py --name 'Full Name' --email person@example.org")
+            temp = "-".join(secrets.token_hex(3) for _ in range(3))
             conn.execute(
                 "INSERT INTO users (name, email, role, password_hash, must_change_password) VALUES (?, ?, 'staff', ?, 1)",
-                ("LVAEP Admin", "admin@lvaep.example", db.hash_password(seed.DEMO_PASSWORD)))
+                ("LVAEP Admin", "admin@lvaep.example", db.hash_password(temp)))
             conn.commit()
-            print(f"Empty database created. Sign in as admin@lvaep.example / {seed.DEMO_PASSWORD}")
+            print(f"Empty database created. Sign in as admin@lvaep.example with the temporary password {temp}")
         elif db.using_postgres() and not args.demo:
             # A hosted database may be the live one: never fill it with fake people by accident.
             sys.exit("This Postgres database is empty. To load the synthetic demo data on purpose, run again with "

@@ -161,6 +161,8 @@ CREATE TABLE IF NOT EXISTS calendar_event_students (
     PRIMARY KEY (event_id, student_id)
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_pair ON sessions (tutor_id, student_id, date);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reminder_runs_auto ON reminder_runs (kind, period_key) WHERE triggered_by IS NULL;
+CREATE INDEX IF NOT EXISTS idx_audit_action_time ON audit_log (action, created_at);
 CREATE INDEX IF NOT EXISTS idx_cal_tutor_date ON calendar_events (tutor_id, date);
 CREATE INDEX IF NOT EXISTS idx_assign_tutor ON assignments (tutor_id);
 CREATE INDEX IF NOT EXISTS idx_assign_student ON assignments (student_id);
@@ -334,7 +336,16 @@ def check_password(password, stored):
 
 def audit(conn, user_id, action, detail=""):
     conn.execute("INSERT INTO audit_log (user_id, action, detail, created_at) VALUES (?, ?, ?, ?)",
-                 (user_id, action, detail, now_iso()))
+                 (user_id, action, str(detail or "")[:500], now_iso()))
+
+
+def is_connection_error(exc):
+    """True when the database is down or unreachable (as opposed to a bug in a request)."""
+    if isinstance(exc, (sqlite3.OperationalError, OSError)):
+        return True
+    module = type(exc).__module__ or ""
+    return module.startswith("psycopg") and type(exc).__name__ in (
+        "OperationalError", "InterfaceError", "PoolTimeout", "ConnectionTimeout", "TooManyRequests")
 
 
 def notify(conn, user_id, kind, message, link=""):
@@ -443,16 +454,25 @@ def report_status(report, sessions_count):
 
 
 def fiscal_breakdown(conn, tutor_id, student_id, month):
-    """Per-month hours from the start of the fiscal year through `month` (what the PDF form totals)."""
+    """Per-month hours from the start of the fiscal year through `month` (what the PDF form totals).
+    One grouped query for the whole year (not one per month): on a hosted database every statement is
+    a network round trip."""
     months = fiscal_months(month)
-    rows = []
-    for m in months:
-        first, last = month_bounds(m)
-        t = hour_totals(
-            conn, "tutor_id = ? AND student_id = ? AND date BETWEEN ? AND ?",
-            (tutor_id, student_id, first.isoformat(), last.isoformat()),
-        )
-        rows.append({"month": m, "future": m > month, **t})
+    fy_first, fy_last = month_bounds(months[0])[0], month_bounds(months[-1])[1]
+    by_month = {}
+    for r in conn.execute(
+        """SELECT substr(date, 1, 7) AS m, COUNT(*) AS entries,
+                  SUM(CASE WHEN attendance = 'present' THEN 1 ELSE 0 END) AS attended,
+                  COALESCE(SUM(tutoring_hours), 0) AS tutoring, COALESCE(SUM(homework_hours), 0) AS homework
+           FROM sessions WHERE tutor_id = ? AND student_id = ? AND date BETWEEN ? AND ?
+           GROUP BY substr(date, 1, 7)""",
+        (tutor_id, student_id, fy_first.isoformat(), fy_last.isoformat()),
+    ):
+        tut, hw = round(r["tutoring"], 2), round(r["homework"], 2)
+        by_month[r["m"]] = {"entries": r["entries"], "attended": r["attended"] or 0,
+                            "tutoring": tut, "homework": hw, "total": round(tut + hw, 2)}
+    empty = {"entries": 0, "attended": 0, "tutoring": 0, "homework": 0, "total": 0}
+    rows = [{"month": m, "future": m > month, **by_month.get(m, empty)} for m in months]
     upto = [r for r in rows if not r["future"]]
     totals = {k: round(sum(r[k] for r in upto), 2) for k in ("tutoring", "homework", "total")}
     totals["attended"] = sum(r["attended"] for r in upto)

@@ -229,7 +229,9 @@ function viewLogin() {
       <label class="field"><span>Password</span><input class="input" type="password" name="password" autocomplete="current-password" required></label>
       <button class="btn primary block" type="submit">Sign in</button>
     </form>
-    <p class="small" style="margin:14px 0 0"><a href="#/forgot">Forgot your password?</a></p>
+    ${state.meta.email_enabled
+    ? html`<p class="small" style="margin:14px 0 0"><a href="#/forgot">Forgot your password?</a></p>`
+    : html`<p class="small muted" style="margin:14px 0 0">Forgot your password? Ask LVAEP staff for a temporary password.</p>`}
     ${state.meta.demo ? html`<div class="demo-accounts"><b>Prototype demo accounts</b> <span class="muted">(password <code>demo1234</code>, synthetic data)</span>
       <button type="button" data-action="demo" data-email="dana@lvaep.example"><span>Dana Whitfield</span><span class="muted">Staff</span></button>
       <button type="button" data-action="demo" data-email="maria@tutors.example"><span>Maria Santos</span><span class="muted">Tutor · 3 students</span></button>
@@ -261,6 +263,11 @@ function authCard(content) {
 }
 
 function viewForgot() {
+  if (!state.meta.email_enabled) {
+    return authCard(html`<h1 style="margin-bottom:6px">Forgot your password?</h1>
+      <p>Email isn't connected to this site yet, so it can't send reset links. Ask LVAEP staff: they can give you a temporary password from <b>Tutors &amp; accounts</b>, and you'll choose a new one when you sign in.</p>
+      <p class="small" style="margin:14px 0 0"><a href="#/login">‹ Back to sign in</a></p>`);
+  }
   authCard(html`<h1 style="margin-bottom:6px">Forgot your password?</h1>
     <p class="muted" style="margin:0 0 18px">Enter the email you use for LVAEP Tutor Hours and we'll email you a link to choose a new password.</p>
     <form id="forgot-form">
@@ -292,7 +299,7 @@ async function viewSetPassword(q) {
   } catch (err) {
     return authCard(html`<h1 style="margin-bottom:6px">This link doesn't work anymore</h1>
       <p>${err.message}</p>
-      <div class="row"><a class="btn primary" href="#/forgot">Email me a new link</a><a class="btn ghost" href="#/login">Sign in</a></div>`);
+      <div class="row">${state.meta.email_enabled ? html`<a class="btn primary" href="#/forgot">Email me a new link</a>` : html`<span class="muted small">Ask LVAEP staff for a temporary password.</span>`}<a class="btn ghost" href="#/login">Sign in</a></div>`);
   }
   const invite = info.purpose === 'invite';
   authCard(html`<h1 style="margin-bottom:6px">${invite ? `Welcome, ${info.name.split(' ')[0]}!` : 'Choose a new password'}</h1>
@@ -888,8 +895,8 @@ function accountDialog(u) {
     </div>
     ${isNew ? '' : html`<label class="check"><input type="checkbox" name="active" value="1" ${u.active ? raw('checked') : ''}><span>Account is active <span class="muted small">— uncheck to block sign-in (history is kept)</span></span></label>`}
     <div class="dialog-actions">
-      ${isNew ? '' : html`<button type="button" class="btn" data-action="send-link" data-id="${u.id}" style="margin-right:auto" title="Email them a link to ${u.must_change_password ? 'accept their invitation' : 'choose a new password'}">${icon('send')} Email sign-in link</button>
-        <button type="button" class="btn ghost" data-action="reset-password" data-id="${u.id}">Temporary password</button>`}
+      ${isNew ? '' : html`${state.meta.email_enabled ? html`<button type="button" class="btn" data-action="send-link" data-id="${u.id}" style="margin-right:auto" title="Email them a link to ${u.must_change_password ? 'accept their invitation' : 'choose a new password'}">${icon('send')} Email sign-in link</button>` : ''}
+        <button type="button" class="btn ghost" data-action="reset-password" data-id="${u.id}" ${state.meta.email_enabled ? '' : raw('style="margin-right:auto"')}>Temporary password</button>`}
       <button type="button" class="btn" data-action="close">Cancel</button>
       <button type="submit" class="btn primary">${isNew ? 'Create account' : 'Save'}</button>
     </div></form>`, async (data) => {
@@ -917,7 +924,8 @@ function showTempPassword(name, email, pw, created, status) {
   const emailed = created && status && status.mode === 'resend';
   openDialog(html`<div class="dialog-inner">
     <h2>${created ? 'Account created' : 'Temporary password'}</h2>
-    ${created ? html`<p>We emailed <b>${name}</b> an invitation at <b>${email}</b> to choose their password${emailNote(status)}.</p>` : ''}
+    ${created ? (emailed ? html`<p>We emailed <b>${name}</b> an invitation at <b>${email}</b> to choose their password${emailNote(status)}.</p>`
+    : html`<p>An invitation email for <b>${name}</b> (${email}) was prepared${emailNote(status)}.</p>`) : ''}
     ${emailed ? html`<details><summary class="small">Show a temporary password instead (if the email doesn't arrive)</summary>` : ''}
     <p${emailed ? '' : raw(' style="margin-top:0"')}>${created ? 'Or give' : 'Give'} <b>${name}</b> these sign-in details. They'll choose their own password when they first sign in.</p>
     <dl class="kv"><dt>Sign-in page</dt><dd>${location.origin}</dd><dt>Email</dt><dd>${email}</dd></dl>

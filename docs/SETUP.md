@@ -47,7 +47,8 @@ Using one shared project for the team's development is simplest.
    DATABASE_URL=postgresql://postgres.abcdefghijklmnop:YOUR-DB-PASSWORD@aws-0-us-east-1.pooler.supabase.com:5432/postgres
    ```
    - **Use the Session pooler, not "Direct connection".** On the free plan the direct connection only works over IPv6, which most home and campus networks don't have.
-   - **Don't use the "Transaction pooler" either.** It's meant for serverless functions.
+   - The **Transaction pooler** (port 6543) is what the Vercel deployment uses (see DEPLOY.md). It also works
+     for local runs, except for `LVAEP_PG_SCHEMA` (schema isolation needs a session-mode connection).
    - If your password contains `@ # ? & /` or spaces, percent-encode them (for example `#` → `%23`).
 4. Install the Postgres driver. It's only needed for Supabase; SQLite needs nothing extra.
    ```bash
@@ -61,15 +62,17 @@ Using one shared project for the team's development is simplest.
    The check then confirms that Supabase's public API can't read the tables.
 6. Start the app on Supabase:
    ```bash
-   .venv/bin/python server.py           # first run on an empty project loads the fake demo data
-   .venv/bin/python server.py --empty   # …or start with just one admin account instead
+   .venv/bin/python server.py --demo    # loads the fake demo data into an empty project (development only)
+   .venv/bin/python bootstrap_admin.py --name "Full Name" --email you@example.org   # …or one real staff login
    ```
+   On Postgres the app never loads demo data unless you pass `--demo`, and `--empty` is refused: a hosted
+   database may be the live one, and the live site must never contain fake people or placeholder logins.
    You can open **Table Editor** in the Supabase dashboard to watch the data appear.
 
 **Starting over:** on Postgres, `--reset` deletes every table's data. Because the database is shared,
 it only runs if you also set `LVAEP_ALLOW_RESET=1` for that command:
 ```bash
-LVAEP_ALLOW_RESET=1 .venv/bin/python server.py --reset
+LVAEP_ALLOW_RESET=1 .venv/bin/python server.py --reset --demo
 ```
 
 ### How the Supabase setup is secured

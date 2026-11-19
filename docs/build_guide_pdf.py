@@ -19,9 +19,9 @@ from reportlab.platypus import (KeepTogether, ListFlowable, ListItem, PageBreak,
                                 Table, TableStyle)
 
 CONFIG = {
-    "site_url": "https://lvaep-tutor-portal.vercel.app",
+    "site_url": "https://lvaep-tutor-portal-umber.vercel.app",
     "admin_name": "Cristhian Barcelos",
-    "admin_email": "(email on file)",
+    "admin_email": "",  # pass --admin-email; the build refuses to run without it
     "support_name": "Henrique Brito Sampaio, Columbia Software Solutions",
     "support_email": "hbs9322@gmail.com",
     "repo_url": "https://github.com/HenriqueSampaio/LVAEP-Tutor-Portal",
@@ -157,9 +157,10 @@ def build(out_path):
               P("Your account is a <b>staff</b> account: it can see and change everything. Tutors get <b>tutor</b> "
                 "accounts that only see their own assigned students. Up to four staff accounts (or more) can be created "
                 "the same way as tutor accounts, by choosing the role <i>Staff</i>."),
-              P("<b>Forgot your password?</b> The sign-in page has a link that emails a reset link. Until email delivery "
-                "is connected (section 4), a staff member can instead open <b>Tutors &amp; accounts → Edit → Temporary "
-                "password</b> to issue a new one. If every staff member is locked out, CSS can reset yours (section 7).")]
+              P("<b>Forgot your password?</b> Until email delivery is connected (section 4) the site can't send reset "
+                "links, and the sign-in page says so. A staff member opens <b>Tutors &amp; accounts → Edit → Temporary "
+                "password</b> to issue a new one. If every staff member is locked out, CSS can reset yours (section 7). "
+                "After ten wrong passwords from the same place, sign-in for that address pauses for 15 minutes.")]
 
     # ---------- 2. set up data ----------
     story += [P("2. Set up LVAEP's data (about 15 minutes)", H1),
@@ -279,11 +280,13 @@ def build(out_path):
                   "<b>Print submitted forms</b> → Save as PDF, and download the <b>Summary CSV</b>.",
                   "<b>Reminders</b> → <b>Send a reminder now</b> for this month; as the tutor, check the bell. Open "
                   "<b>Recent emails → Preview</b> to see the invitation and reminder emails that would have been sent.",
-                  "<b>Students</b> → Sample Student → <b>Drop</b> with a reason, then try to assign a tutor (refused) and "
-                  "<b>Readmit</b>. Check the <b>Activity log</b>.",
+                  "<b>Students</b> → Sample Student → <b>Drop</b> with a reason; notice that assigning a tutor is no "
+                  "longer offered. Then <b>Readmit</b> (the site asks you to confirm). Check the <b>Activity log</b>.",
               ]),
-              P("When you are done testing, staff can delete nothing yet (there is no delete button, on purpose — records "
-                "are audited); CSS will clear test records before real use, or start a fresh database.", SMALL)]
+              P("Individual session entries can be deleted (by the tutor until the month is submitted, by staff any "
+                "time; every deletion is logged). Students, tutors, assignments and reports are never deleted — they "
+                "are paused, ended, dropped or deactivated so the history stays. CSS will clear your test records before "
+                "real use, or start a fresh database.", SMALL)]
 
     story.append(PageBreak())
 
@@ -324,7 +327,10 @@ def build(out_path):
                   "Sessions use HttpOnly, Secure cookies and expire after 14 days.",
                   "Tutors can only read and write the students assigned to them; every request is checked on the server, "
                   "not just hidden in the interface. Staff can see everything. There is no public or anonymous access.",
-                  "Repeated wrong passwords are throttled (10 failures in 15 minutes locks that email for 15 minutes).",
+                  "Repeated wrong passwords are throttled (after 10 failures from one place, that address waits 15 "
+                  "minutes; a wider limit slows guessing from many places). Unknown and known emails answer in the same "
+                  "time, so the sign-in page doesn't reveal who has an account. With a temporary password, only the "
+                  "choose-your-password page works. Changing a password signs out every other device.",
                   "The database accepts connections only with its password; Supabase's public data API is disabled for "
                   "every table (row-level security on, no policies).",
                   "Every staff action that changes data (corrections, returns, drops, readmissions, account changes) is "
@@ -337,8 +343,10 @@ def build(out_path):
               bullets([
                   "On the free database plan there are <b>no automatic backups</b>. CSS can take a manual export at any time "
                   "(and will do so before any change to the live site). For real use, the Pro plan adds daily backups.",
-                  "The free database plan pauses a project after about a week with no activity; the site's daily job "
-                  "keeps it active, and if it ever pauses, CSS restores it from the dashboard in about a minute.",
+                  "The free database plan pauses a project after about a week without database activity. The site's "
+                  "daily job queries the database every morning, which should keep it awake; if it ever pauses, the "
+                  "site shows a \"database isn't reachable\" message and CSS restores it from the dashboard in about a "
+                  "minute (nothing is lost).",
                   "The hosting and database providers both publish status pages. If the site shows \"Couldn't load this "
                   "page\" or \"Something went wrong on the server\", email the support contact below.",
               ])]
@@ -352,8 +360,9 @@ def build(out_path):
                   ["DATABASE_URL", "Supabase connection string (transaction pooler, port 6543). Secret: it is the key to "
                                    "all the data. Rotate it in Supabase → Settings → Database if it ever leaks."],
                   ["CRON_SECRET", "Random secret the daily job must present. Vercel sends it automatically."],
+                  ["APP_URL", f"The site's address ({url}); used in emails and email previews."],
                   ["EMAIL_MODE", "<i>stored</i> (default on Vercel): keep emails for preview. Remove it and set "
-                                 "RESEND_API_KEY, EMAIL_FROM, EMAIL_REPLY_TO and APP_URL to send real email."],
+                                 "RESEND_API_KEY, EMAIL_FROM and EMAIL_REPLY_TO to send real email."],
                   ["LVAEP_TZ", "Time zone for dates and the daily check (default America/New_York)."],
               ], [1.5 * inch, 5.0 * inch]),
               P("7.2 Redeploying after a code change", H2),
@@ -372,13 +381,17 @@ def build(out_path):
                 "refuses to run on a database that contains the synthetic demo data, so demo records can never end up on "
                 "the live site."),
               P("7.4 Running it on a laptop (development and demos)", H2),
-              P("python3 server.py            # http://localhost:8070 with synthetic demo data (SQLite, no setup)<br/>"
-                "python3 server.py --reset --empty   # empty local database with one admin login<br/>"
-                "python3 check_setup.py       # checks the database and email settings in .env", CODE),
-              P("Local runs use a SQLite file in <font face='Courier'>data/</font> and save emails as HTML files in "
-                "<font face='Courier'>data/outbox/</font>. The same code runs on PostgreSQL when DATABASE_URL is set; "
-                "the test-suite runs on both. See <font face='Courier'>README.md</font> and "
-                "<font face='Courier'>docs/SETUP.md</font> in the repository for details.")]
+              P("DATABASE_URL= python3 server.py     # http://localhost:8070, SQLite with synthetic demo data<br/>"
+                "python3 server.py --reset --empty   # empty local database with one admin login (SQLite)<br/>"
+                "python3 -m unittest discover -s tests -t . -v   # the automated tests<br/>"
+                "python3 check_setup.py              # checks the database and email settings in .env", CODE),
+              P("A laptop run uses a local SQLite file in <font face='Courier'>data/</font> (demo data, emails saved "
+                "as HTML files in <font face='Courier'>data/outbox/</font>) <b>only when no DATABASE_URL is set</b>. "
+                "With the live DATABASE_URL in <font face='Courier'>.env</font>, <font face='Courier'>server.py</font> "
+                "would connect to the live database — hence the empty <font face='Courier'>DATABASE_URL=</font> prefix "
+                "above, and never load demo data into Postgres unless <font face='Courier'>--demo</font> is passed. "
+                "See <font face='Courier'>README.md</font>, <font face='Courier'>docs/SETUP.md</font> and "
+                "<font face='Courier'>docs/DEPLOY.md</font> in the repository.")]
 
     # ---------- 8. not yet / decisions ----------
     story += [P("8. What's not in the MVP yet, and decisions we need from LVAEP", H1),
@@ -388,7 +401,9 @@ def build(out_path):
                   "<b>Text-message reminders</b>, payroll, learning plans and automatic achievement scoring (out of scope in "
                   "the PRD).",
                   "<b>Importing past months</b> from the old PDF forms (the PRD leaves this to LVAEP to decide).",
-                  "<b>Deleting records</b> from the interface (records are kept and audited; CSS can purge test data).",
+                  "<b>Deleting students, tutors, assignments or reports</b> from the interface (they are paused, ended "
+                  "or deactivated instead, so history is kept; only individual session entries can be deleted, and that "
+                  "is logged). CSS can purge test data.",
               ]),
               P("8.2 Assumptions built into the MVP that need your confirmation", H2),
               P("These are the open PRD decisions. Each is implemented one way so you can see it working; all are easy to "
@@ -450,6 +465,9 @@ def main():
     for key in ("site_url", "admin_name", "admin_email", "cron_time", "version"):
         if getattr(args, key):
             CONFIG[key] = getattr(args, key)
+    if "@" not in CONFIG["admin_email"]:
+        raise SystemExit("Pass --admin-email with the administrator's real address: the guide tells them to sign in with it.")
+    print(f"Building for {CONFIG['admin_name']} <{CONFIG['admin_email']}> at {CONFIG['site_url']}")
     print("Wrote", build(args.out))
 
 

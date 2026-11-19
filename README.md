@@ -13,7 +13,7 @@ Requires only Python 3.9+ (no packages to install).
 ```bash
 python3 server.py            # http://localhost:8070 — loads demo data on first run
 python3 server.py --reset    # wipe and reload the demo data
-python3 server.py --reset --empty   # empty system with one admin (admin@lvaep.example / demo1234)
+python3 server.py --reset --empty   # empty system with one admin (admin@lvaep.example; a temporary password is printed)
 python3 server.py --host 0.0.0.0    # open it from a phone on the same Wi-Fi
 python3 -m unittest discover -s tests -t . -v   # acceptance, calendar, print, email, Postgres and WSGI tests (58)
 ```
