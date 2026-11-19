@@ -7,6 +7,8 @@ delivers queued emails and retries failures.
 Delivery depends on the environment:
     RESEND_API_KEY set        -> sent through Resend (https://resend.com)
     no key (the default)      -> written as .html files to data/outbox/ so you can open them
+    no key, serverless host   -> "stored": kept in the database only (no writable disk on Vercel);
+                                 staff can preview them on the Reminders page. EMAIL_MODE=stored forces it.
     EMAIL_MODE=off            -> nothing is sent or written
 
 Other settings:
@@ -88,11 +90,19 @@ _worker = None
 
 # ---------- configuration ----------
 
+MODES = ("off", "outbox", "stored", "resend")
+
+
 def mode():
     forced = os.environ.get("EMAIL_MODE", "").strip().lower()
-    if forced in ("off", "outbox", "resend"):
+    if forced in MODES:
         return forced
-    return "resend" if os.environ.get("RESEND_API_KEY", "").strip() else "outbox"
+    if os.environ.get("RESEND_API_KEY", "").strip():
+        return "resend"
+    # Serverless hosts have no writable disk: keep the emails in the database instead of files.
+    if os.environ.get("VERCEL") or os.environ.get("LVAEP_SERVERLESS") == "1":
+        return "stored"
+    return "outbox"
 
 
 def app_url():
@@ -212,15 +222,24 @@ def _save_file(row):
     return path
 
 
+def has_queued():
+    """True if an email was queued since the last delivery pass (cheap: no database access)."""
+    return _wake.is_set()
+
+
 def deliver_pending(conn=None, limit=50):
     """Send (or save) queued emails. Safe to call any time; returns how many were handled."""
     own = conn is None
     conn = conn or db.connect()
     handled = 0
+    _wake.clear()
     try:
         rows = conn.execute(
             """SELECT * FROM email_outbox WHERE status = 'queued' OR (status = 'failed' AND attempts < ?)
-               ORDER BY id LIMIT ?""", (MAX_ATTEMPTS, limit)).fetchall()
+               ORDER BY id LIMIT ?""", (MAX_ATTEMPTS, limit + 1)).fetchall()
+        if len(rows) > limit:  # more left: make sure the next pass happens
+            rows = rows[:limit]
+            _wake.set()
         m = mode()
         for row in rows:
             to_email, to_name, subject, body = row["to_email"], row["to_name"], row["subject"], row["html"]
@@ -230,6 +249,8 @@ def deliver_pending(conn=None, limit=50):
             try:
                 if m == "off":
                     status, error = "skipped", "Email is turned off (EMAIL_MODE=off)."
+                elif m == "stored":
+                    status, error = "saved", "Email isn't connected yet — kept here for preview."
                 elif m == "outbox":
                     status, provider_id = "saved", _save_file(row)
                 elif redirect:
@@ -287,4 +308,4 @@ def recent(conn, limit=50):
 
 
 def expires_in(hours):
-    return (dt.datetime.now() + dt.timedelta(hours=hours)).replace(microsecond=0).isoformat(sep=" ")
+    return (db.now() + dt.timedelta(hours=hours)).replace(microsecond=0).isoformat(sep=" ")

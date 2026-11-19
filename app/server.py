@@ -1,5 +1,13 @@
-"""HTTP server and JSON API for the LVAEP tutor reporting prototype (Python stdlib only)."""
+"""HTTP server and JSON API for the LVAEP tutor reporting prototype (Python stdlib only).
+
+The request handling is split in two so the same code runs everywhere:
+  handle()  — pure function: (method, path, headers, body) -> Response. Used by the local
+              ThreadingHTTPServer below and by app/wsgi.py (Vercel, or any WSGI host).
+  Handler   — the stdlib BaseHTTPRequestHandler wrapper for `python3 server.py`.
+"""
 import datetime as dt
+import hmac
+import html as htmlmod
 import json
 import os
 import re
@@ -118,18 +126,31 @@ def staff_ids(conn):
 
 # ---------- auth ----------
 
+LOGIN_MAX_FAILURES, LOGIN_WINDOW_MINUTES = 10, 15  # per email address; slows down password guessing
+
+
 @route("POST", "/api/login", auth=False)
 def login(ctx):
     need(ctx.body, "email", "password")
-    u = ctx.conn.execute("SELECT * FROM users WHERE email = ?", (ctx.body["email"].strip(),)).fetchone()
+    email = ctx.body["email"].strip()
+    since = (db.now() - dt.timedelta(minutes=LOGIN_WINDOW_MINUTES)).replace(microsecond=0).isoformat(sep=" ")
+    failures = ctx.conn.execute(
+        "SELECT COUNT(*) AS c FROM audit_log WHERE action = 'login.failed' AND detail = ? AND created_at > ?",
+        (email.lower(), since)).fetchone()["c"]
+    if failures >= LOGIN_MAX_FAILURES:
+        raise ApiError(429, f"Too many sign-in attempts. Wait {LOGIN_WINDOW_MINUTES} minutes and try again, "
+                            "or use “Forgot your password?”.")
+    u = ctx.conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
     if not u or not db.check_password(ctx.body["password"], u["password_hash"]):
+        db.audit(ctx.conn, None, "login.failed", email.lower())
+        ctx.conn.commit()  # keep the failed attempt even though the request ends in an error
         raise ApiError(401, "That email and password don't match an account.")
     if not u["active"]:
         raise ApiError(403, "This account has been deactivated. Contact LVAEP staff.")
     token = secrets.token_urlsafe(32)
-    expires = (dt.datetime.now() + dt.timedelta(days=TOKEN_DAYS)).isoformat()
+    expires = (db.now() + dt.timedelta(days=TOKEN_DAYS)).isoformat()
     ctx.conn.execute("INSERT INTO auth_tokens (token, user_id, expires_at) VALUES (?, ?, ?)", (token, u["id"], expires))
-    ctx.conn.execute("DELETE FROM auth_tokens WHERE expires_at < ?", (dt.datetime.now().isoformat(),))
+    ctx.conn.execute("DELETE FROM auth_tokens WHERE expires_at < ?", (db.now().isoformat(),))
     ctx.set_cookie = token
     return {"user": user_public(u)}
 
@@ -170,7 +191,9 @@ def change_password(ctx):
 def meta(ctx):
     return {"attendance": db.ATTENDANCE_CODES, "achievements": db.ACHIEVEMENTS,
             "achievement_groups": [{"heading": h, "items": items} for h, items in db.ACHIEVEMENT_GROUPS],
-            "today": db.today().isoformat(), "weekly_target": db.WEEKLY_TARGET_HOURS}
+            "today": db.today().isoformat(), "weekly_target": db.WEEKLY_TARGET_HOURS,
+            # The sign-in page only offers the one-click demo accounts when the synthetic demo data is loaded.
+            "demo": db.has_demo_data(ctx.conn)}
 
 
 # ---------- notifications ----------
@@ -1005,10 +1028,161 @@ def print_forms(ctx):
     return Raw(html, "text/html; charset=utf-8")
 
 
-# ---------- HTTP plumbing ----------
+# ---------- scheduled job (Vercel Cron, or any external scheduler) ----------
+
+@route("GET", "/api/cron/daily", auth=False)
+def cron_daily(ctx):
+    """Run the reminder schedule and send queued emails. On a serverless host there are no
+    background threads, so the host's cron calls this once a day. Vercel sends
+    `Authorization: Bearer $CRON_SECRET`; without a matching secret the request is refused."""
+    secret = os.environ.get("CRON_SECRET", "").strip()
+    given = (ctx.headers.get("Authorization") or "").strip()
+    if not secret or not hmac.compare_digest(given, f"Bearer {secret}"):
+        raise ApiError(401, "Unauthorized.")
+    ctx.conn.commit()
+    sent = reminders.run_scheduled(ctx.conn)
+    handled = mailer.deliver_pending(ctx.conn)
+    return {"ran_at": db.now_iso(), "today": db.today().isoformat(),
+            "reminders": [{"kind": k, "recipients": n} for k, n in sent], "emails_handled": handled}
+
+
+# ---------- HTTP plumbing (shared by the local server and the WSGI app) ----------
+
+class Headers:
+    """Case-insensitive, read-only view of the request headers."""
+
+    def __init__(self, items):
+        self._h = {str(k).lower(): v for k, v in items}
+
+    def get(self, name, default=None):
+        return self._h.get(name.lower(), default)
+
+
+class Response:
+    def __init__(self, status, body, content_type="application/json; charset=utf-8", headers=None):
+        self.status = status
+        self.body = body.encode() if isinstance(body, str) else body
+        self.headers = [("Content-Type", content_type), ("Content-Length", str(len(self.body))),
+                        ("X-Content-Type-Options", "nosniff"), ("Cache-Control", "no-store"),
+                        ("X-Frame-Options", "DENY"), ("Referrer-Policy", "same-origin")]
+        for k, v in (headers or {}).items():
+            self.headers.append((k, v))
+
+
+def serverless():
+    """True when running as a serverless function (Vercel sets VERCEL=1): no background threads."""
+    return os.environ.get("LVAEP_SERVERLESS") == "1" or bool(os.environ.get("VERCEL"))
+
+
+# With no mailer thread, queued emails are delivered at the end of the request that queued them.
+INLINE_MAIL = serverless()
+
+STATIC_TYPES = {".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml",
+                ".png": "image/png", ".ico": "image/x-icon", ".webmanifest": "application/manifest+json"}
+
+
+def static_response(path):
+    """A file from static/ (the single-page app); anything unknown gets index.html."""
+    if path in ("/", ""):
+        path = "/index.html"
+    full = os.path.normpath(os.path.join(STATIC_DIR, path.lstrip("/")))
+    if not full.startswith(STATIC_DIR + os.sep) or not os.path.isfile(full):
+        full = os.path.join(STATIC_DIR, "index.html")
+    ext = os.path.splitext(full)[1]
+    with open(full, "rb") as f:
+        return Response(200, f.read(), STATIC_TYPES.get(ext, "application/octet-stream") + "; charset=utf-8")
+
+
+def wants_secure_cookie(headers):
+    """Mark the session cookie Secure when the site is served over HTTPS (Vercel and other hosts
+    say so with X-Forwarded-Proto). LVAEP_SECURE_COOKIES=1/0 forces it either way."""
+    forced = os.environ.get("LVAEP_SECURE_COOKIES", "").strip()
+    if forced in ("0", "1"):
+        return forced == "1"
+    proto = (headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+    return proto == "https"
+
+
+def cookie_header(value, secure):
+    age = TOKEN_DAYS * 86400 if value else 0
+    return f"{COOKIE}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={age}" + ("; Secure" if secure else "")
+
+
+def handle(method, raw_path, headers, body=b""):
+    """Answer one HTTP request: returns a Response. `headers` is a Headers, `body` the raw bytes."""
+    url = urlparse(raw_path)
+    path = url.path
+    if method == "GET" and not (path.startswith("/api/") or path.startswith("/export/") or path == "/print"):
+        return static_response(path)
+    for m, pattern, fn, role, auth in ROUTES:
+        match = pattern.match(path)
+        if m == method and match:
+            return run_route(fn, role, auth, match.groupdict(), parse_qs(url.query), method, path, headers, body)
+    return Response(404, json.dumps({"error": "Not found."}))
+
+
+def run_route(fn, role, auth, params, query, method, path, headers, body_bytes):
+    conn = db.connect()
+    try:
+        body = {}
+        if method in ("POST", "PUT") and body_bytes:
+            if "application/json" not in (headers.get("Content-Type") or ""):
+                raise ApiError(415, "Send JSON.")
+            body = json.loads(body_bytes)
+            if not isinstance(body, dict):
+                raise ApiError(400, "Request body must be a JSON object.")
+        jar = cookies.SimpleCookie()
+        try:
+            jar.load(headers.get("Cookie") or "")
+        except cookies.CookieError:
+            pass
+        token = jar[COOKIE].value if COOKIE in jar else None
+        user = None
+        if token:
+            user = conn.execute(
+                """SELECT u.* FROM auth_tokens t JOIN users u ON u.id = t.user_id
+                   WHERE t.token = ? AND t.expires_at > ? AND u.active = 1""",
+                (token, db.now().isoformat())).fetchone()
+        if auth and not user:
+            raise ApiError(401, "Please sign in.")
+        if role and user["role"] != role:
+            raise ApiError(403, "You don't have access to this page.")
+        ctx = Ctx(conn, user, params, query, body)
+        ctx.token, ctx.set_cookie, ctx.headers = token, None, headers
+        result = fn(ctx)
+        conn.commit()
+        if INLINE_MAIL and mailer.has_queued():
+            try:
+                mailer.deliver_pending(conn, limit=25)
+            except Exception:  # the action itself succeeded; delivery is retried by the daily job
+                traceback.print_exc()
+        out = {}
+        if ctx.set_cookie is not None:
+            out["Set-Cookie"] = cookie_header(ctx.set_cookie, wants_secure_cookie(headers))
+        if isinstance(result, Raw):
+            if result.filename:
+                out["Content-Disposition"] = f'attachment; filename="{result.filename}"'
+            return Response(200, result.body, result.content_type, out)
+        return Response(200, json.dumps(result), headers=out)
+    except ApiError as e:
+        conn.rollback()
+        if path.startswith("/print") or path.startswith("/export"):
+            return Response(e.status, f"<p style='font-family:sans-serif'>{htmlmod.escape(e.message)} "
+                                      "<a href='/'>Back to the app</a></p>", "text/html; charset=utf-8")
+        return Response(e.status, json.dumps({"error": e.message, **e.extra}))
+    except json.JSONDecodeError:
+        conn.rollback()
+        return Response(400, json.dumps({"error": "Request body is not valid JSON."}))
+    except Exception:
+        conn.rollback()
+        traceback.print_exc()
+        return Response(500, json.dumps({"error": "Something went wrong on the server."}))
+    finally:
+        conn.close()
+
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "LVAEP/0.1"
+    server_version = "LVAEP/0.2"
 
     def log_message(self, fmt, *args):
         if os.environ.get("LVAEP_QUIET") != "1":
@@ -1026,94 +1200,36 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         self.dispatch("DELETE")
 
-    def send(self, status, body, content_type="application/json; charset=utf-8", headers=None):
-        data = body.encode() if isinstance(body, str) else body
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Cache-Control", "no-store")
-        for k, v in (headers or {}).items():
+    def dispatch(self, method):
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length > 0 else b""
+        resp = handle(method, self.path, Headers(self.headers.items()), body)
+        self.send_response(resp.status)
+        for k, v in resp.headers:
             self.send_header(k, v)
         self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(data)
+        self.wfile.write(resp.body)
 
-    def serve_static(self, path):
-        if path in ("/", ""):
-            path = "/index.html"
-        full = os.path.normpath(os.path.join(STATIC_DIR, path.lstrip("/")))
-        if not full.startswith(STATIC_DIR) or not os.path.isfile(full):
-            full = os.path.join(STATIC_DIR, "index.html")
-        types = {".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml",
-                 ".png": "image/png", ".ico": "image/x-icon", ".webmanifest": "application/manifest+json"}
-        ext = os.path.splitext(full)[1]
-        with open(full, "rb") as f:
-            self.send(200, f.read(), types.get(ext, "application/octet-stream") + "; charset=utf-8")
 
-    def dispatch(self, method):
-        url = urlparse(self.path)
-        path = url.path
-        if method == "GET" and not (path.startswith("/api/") or path.startswith("/export/") or path == "/print"):
-            return self.serve_static(path)
-        for m, pattern, fn, role, auth in ROUTES:
-            match = pattern.match(path)
-            if m == method and match:
-                return self.run(fn, role, auth, match.groupdict(), parse_qs(url.query))
-        self.send(404, json.dumps({"error": "Not found."}))
+_init_lock = threading.Lock()
+_initialized = False
 
-    def run(self, fn, role, auth, params, query):
+
+def ensure_initialized():
+    """Create any missing tables once per process (cheap no-op afterwards)."""
+    global _initialized
+    if _initialized:
+        return
+    with _init_lock:
+        if _initialized:
+            return
         conn = db.connect()
         try:
-            body = {}
-            if self.command in ("POST", "PUT"):
-                length = int(self.headers.get("Content-Length") or 0)
-                if length:
-                    if "application/json" not in (self.headers.get("Content-Type") or ""):
-                        raise ApiError(415, "Send JSON.")
-                    body = json.loads(self.rfile.read(length) or b"{}")
-            jar = cookies.SimpleCookie(self.headers.get("Cookie") or "")
-            token = jar[COOKIE].value if COOKIE in jar else None
-            user = None
-            if token:
-                user = conn.execute(
-                    """SELECT u.* FROM auth_tokens t JOIN users u ON u.id = t.user_id
-                       WHERE t.token = ? AND t.expires_at > ? AND u.active = 1""",
-                    (token, dt.datetime.now().isoformat())).fetchone()
-            if auth and not user:
-                raise ApiError(401, "Please sign in.")
-            if role and user["role"] != role:
-                raise ApiError(403, "You don't have access to this page.")
-            ctx = Ctx(conn, user, params, query, body)
-            ctx.token, ctx.set_cookie = token, None
-            result = fn(ctx)
-            conn.commit()
-            headers = {}
-            if ctx.set_cookie is not None:
-                age = TOKEN_DAYS * 86400 if ctx.set_cookie else 0
-                headers["Set-Cookie"] = f"{COOKIE}={ctx.set_cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age={age}"
-            if isinstance(result, Raw):
-                if result.filename:
-                    headers["Content-Disposition"] = f'attachment; filename="{result.filename}"'
-                self.send(200, result.body, result.content_type, headers)
-            else:
-                self.send(200, json.dumps(result), headers=headers)
-        except ApiError as e:
-            conn.rollback()
-            if self.path.startswith("/print") or self.path.startswith("/export"):
-                self.send(e.status, f"<p style='font-family:sans-serif'>{e.message} <a href='/'>Back to the app</a></p>",
-                          "text/html; charset=utf-8")
-            else:
-                self.send(e.status, json.dumps({"error": e.message, **e.extra}))
-        except json.JSONDecodeError:
-            conn.rollback()
-            self.send(400, json.dumps({"error": "Request body is not valid JSON."}))
-        except Exception:
-            conn.rollback()
-            traceback.print_exc()
-            self.send(500, json.dumps({"error": "Something went wrong on the server."}))
+            db.init(conn)
+            mailer.init(conn)
         finally:
             conn.close()
+        _initialized = True
 
 
 def scheduler_loop(interval):
@@ -1130,10 +1246,12 @@ def scheduler_loop(interval):
 
 
 def serve(host="127.0.0.1", port=8070, scheduler=True):
-    conn = db.connect()
-    db.init(conn)
-    mailer.init(conn)
-    conn.close()
+    conn = db.connect()  # always: the tests start several servers on fresh databases in one process
+    try:
+        db.init(conn)
+        mailer.init(conn)
+    finally:
+        conn.close()
     httpd = ThreadingHTTPServer((host, port), Handler)
     if scheduler:
         threading.Thread(target=scheduler_loop, args=(1800,), daemon=True).start()

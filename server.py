@@ -7,6 +7,7 @@
 """
 import argparse
 import os
+import sys
 
 from app import env
 
@@ -24,6 +25,8 @@ def main():
     p.add_argument("--reset", action="store_true",
                    help="delete the database and reload demo data (on Postgres also needs LVAEP_ALLOW_RESET=1)")
     p.add_argument("--empty", action="store_true", help="with --reset or on first run: no demo data")
+    p.add_argument("--demo", action="store_true",
+                   help="load the synthetic demo data into an empty Postgres database (SQLite does this by default)")
     args = p.parse_args()
 
     if args.reset:
@@ -39,6 +42,11 @@ def main():
                 ("LVAEP Admin", "admin@lvaep.example", db.hash_password(seed.DEMO_PASSWORD)))
             conn.commit()
             print(f"Empty database created. Sign in as admin@lvaep.example / {seed.DEMO_PASSWORD}")
+        elif db.using_postgres() and not args.demo:
+            # A hosted database may be the live one: never fill it with fake people by accident.
+            sys.exit("This Postgres database is empty. To load the synthetic demo data on purpose, run again with "
+                     "--demo.\nFor a real site, create the first staff account instead:\n"
+                     "    python3 bootstrap_admin.py --name 'Full Name' --email person@example.org")
         else:
             seed.seed(conn)
             print(f"Loaded synthetic demo data (password for every demo account: {seed.DEMO_PASSWORD})")

@@ -29,7 +29,9 @@ class TranslateTest(unittest.TestCase):
     def test_functions(self):
         self.assertEqual(self.t("SELECT GROUP_CONCAT(u.name, ', ') FROM users u"),
                          "SELECT string_agg(u.name, ', ') FROM users u")
-        self.assertIn("to_char(LOCALTIMESTAMP", self.t("UPDATE x SET at = datetime('now', 'localtime')"))
+        # Explicit zone, not the session's: Supabase's transaction pooler doesn't keep session settings.
+        self.assertIn(f"to_char(now() AT TIME ZONE '{pg.TIMEZONE}'", self.t("UPDATE x SET at = datetime('now', 'localtime')"))
+        self.assertIn(f"(now() AT TIME ZONE '{pg.TIMEZONE}')::date", self.t("SELECT date('now', 'localtime')"))
 
     def test_schema(self):
         ddl = self.t("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE COLLATE NOCASE, "

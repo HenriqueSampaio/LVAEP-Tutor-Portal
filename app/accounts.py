@@ -9,10 +9,12 @@ leak working links. The old temporary-password flow still works as a fallback.
 """
 import datetime as dt
 import hashlib
+import html as htmlmod
+import re
 import secrets
 
 from . import db, mailer
-from .server import TOKEN_DAYS, ApiError, need, route, user_public
+from .server import TOKEN_DAYS, ApiError, Raw, need, route, user_public
 
 INVITE_HOURS = 7 * 24
 RESET_HOURS = 24
@@ -74,7 +76,7 @@ def _find_link(conn, token):
 
 
 def _recent_links(conn, user_id):
-    since = (dt.datetime.now() - dt.timedelta(hours=1)).replace(microsecond=0).isoformat(sep=" ")
+    since = (db.now() - dt.timedelta(hours=1)).replace(microsecond=0).isoformat(sep=" ")
     return conn.execute("SELECT COUNT(*) AS c FROM login_links WHERE user_id = ? AND created_at > ?",
                         (user_id, since)).fetchone()["c"]
 
@@ -111,7 +113,7 @@ def use_link(ctx):
     db.audit(ctx.conn, row["user_id"], "account.password_set", f"via {row['purpose']} link")
     # Sign them straight in.
     token = secrets.token_urlsafe(32)
-    expires = (dt.datetime.now() + dt.timedelta(days=TOKEN_DAYS)).isoformat()
+    expires = (db.now() + dt.timedelta(days=TOKEN_DAYS)).isoformat()
     ctx.conn.execute("INSERT INTO auth_tokens (token, user_id, expires_at) VALUES (?, ?, ?)",
                      (token, row["user_id"], expires))
     ctx.set_cookie = token
@@ -135,3 +137,19 @@ def staff_send_link(ctx):
 @route("GET", "/api/staff/emails", role="staff")
 def staff_emails(ctx):
     return {"status": mailer.status(), "items": mailer.recent(ctx.conn)}
+
+
+@route("GET", r"/api/staff/emails/(?P<id>\d+)/preview", role="staff")
+def staff_email_preview(ctx):
+    """The stored email as a web page, so staff can see what tutors get (or would get, while email
+    isn't connected). Sign-in links are blanked out: a preview must not double as a working link."""
+    row = ctx.conn.execute("SELECT * FROM email_outbox WHERE id = ?", (int(ctx.params["id"]),)).fetchone()
+    if not row:
+        raise ApiError(404, "Email not found.")
+    page = re.sub(r"token=[\w-]+", "token=" + "•" * 12, row["html"])
+    note = (f'<div style="font-family:Arial,sans-serif;font-size:13px;background:#fff7d6;padding:8px 12px">'
+            f'Preview · To: {htmlmod.escape(row["to_name"])} &lt;{htmlmod.escape(row["to_email"])}&gt; · '
+            f'Subject: {htmlmod.escape(row["subject"])} · Status: {htmlmod.escape(row["status"])}'
+            f'{" — " + htmlmod.escape(row["last_error"]) if row["last_error"] else ""}</div>')
+    page = re.sub(r"(<body[^>]*>)", lambda m: m.group(1) + note, page, count=1)
+    return Raw(page, "text/html; charset=utf-8")

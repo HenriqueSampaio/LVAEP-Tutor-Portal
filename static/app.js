@@ -230,11 +230,11 @@ function viewLogin() {
       <button class="btn primary block" type="submit">Sign in</button>
     </form>
     <p class="small" style="margin:14px 0 0"><a href="#/forgot">Forgot your password?</a></p>
-    <div class="demo-accounts"><b>Prototype demo accounts</b> <span class="muted">(password <code>demo1234</code>, synthetic data)</span>
+    ${state.meta.demo ? html`<div class="demo-accounts"><b>Prototype demo accounts</b> <span class="muted">(password <code>demo1234</code>, synthetic data)</span>
       <button type="button" data-action="demo" data-email="dana@lvaep.example"><span>Dana Whitfield</span><span class="muted">Staff</span></button>
       <button type="button" data-action="demo" data-email="maria@tutors.example"><span>Maria Santos</span><span class="muted">Tutor · 3 students</span></button>
       <button type="button" data-action="demo" data-email="james@tutors.example"><span>James Okoro</span><span class="muted">Tutor · 3 students</span></button>
-    </div>
+    </div>` : ''}
   </div></div>`);
   $('#login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -909,6 +909,7 @@ function emailNote(status) {
   if (!status) return '';
   if (status.mode === 'resend') return status.redirect_to ? ` (test mode: it actually goes to ${status.redirect_to})` : '';
   if (status.mode === 'outbox') return ' — email isn\'t connected yet, so it was saved on the server instead of sent';
+  if (status.mode === 'stored') return ' — email isn\'t connected yet, so it was kept under Reminders → Recent emails instead of sent';
   return ' — email is turned off, so it was not sent';
 }
 
@@ -938,6 +939,9 @@ function emailBanner(st) {
   }
   if (st.mode === 'outbox') {
     return html`<div class="banner info">${icon('bell')}<div><b>Email isn't connected yet.</b><p>Reminders appear in each tutor's notification bell. Emails are saved on the server for previewing instead of being sent — add a Resend API key to send them (see the README).</p></div></div>`;
+  }
+  if (st.mode === 'stored') {
+    return html`<div class="banner info">${icon('bell')}<div><b>Email isn't connected yet.</b><p>Tutors see reminders in the notification bell inside the app. Every email the site <i>would</i> send (invitations, reminders, returned reports) is kept in the <b>Recent emails</b> list below — open <b>Preview</b> to read it. Until email is connected, give new tutors their temporary password directly. Sending turns on once LVAEP's email domain is connected (see the setup guide).</p></div></div>`;
   }
   return html`<div class="banner info">${icon('bell')}<div><b>Email is turned off.</b><p>Reminders appear in each tutor's notification bell only.</p></div></div>`;
 }
@@ -973,11 +977,12 @@ async function viewReminders() {
       <tbody>${d.runs.map((r) => html`<tr><td class="nowrap">${fmtDT(r.ran_at)}</td><td>${KIND[r.kind] || r.kind}</td><td>${r.kind === 'weekly' ? r.period_key : monthLabel(r.period_key)}</td><td class="n">${r.recipients}</td><td>${r.triggered_by_name || 'Automatic'}</td></tr>`)}
       ${d.runs.length ? '' : html`<tr><td colspan="5" class="empty">No reminders sent yet.</td></tr>`}</tbody></table></div>
     <div class="section-title"><h2>Recent emails</h2></div>
-    <div class="card table-wrap"><table class="data"><thead><tr><th>When</th><th>To</th><th>Email</th><th>Status</th></tr></thead>
+    <div class="card table-wrap"><table class="data"><thead><tr><th>When</th><th>To</th><th>Email</th><th>Status</th><th></th></tr></thead>
       <tbody>${mail.items.map((m) => html`<tr><td class="nowrap">${fmtDT(m.created_at)}</td><td>${m.to_name}<div class="sub">${m.to_email}</div></td>
         <td>${EMAIL_KIND[m.kind] || m.kind}<div class="sub">${m.subject}</div></td>
-        <td>${EMAIL_STATUS[m.status] || m.status}${m.status === 'failed' || m.status === 'skipped' ? html`<div class="sub">${m.last_error}</div>` : ''}</td></tr>`)}
-      ${mail.items.length ? '' : html`<tr><td colspan="4" class="empty">No emails yet.</td></tr>`}</tbody></table></div>`);
+        <td>${EMAIL_STATUS[m.status] || m.status}${m.status === 'failed' || m.status === 'skipped' ? html`<div class="sub">${m.last_error}</div>` : ''}</td>
+        <td><a class="btn sm" href="/api/staff/emails/${m.id}/preview" target="_blank" rel="noopener">Preview</a></td></tr>`)}
+      ${mail.items.length ? '' : html`<tr><td colspan="5" class="empty">No emails yet.</td></tr>`}</tbody></table></div>`);
   $('#rem-form').addEventListener('change', async (e) => {
     const f = e.currentTarget;
     await api('/api/staff/reminders/settings', { method: 'PUT', body: {

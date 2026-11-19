@@ -33,7 +33,13 @@ import threading
 _pool = None
 _pool_lock = threading.Lock()
 _tables_with_id = set()
+_id_tables_loaded = False
+# Timestamps are written in LVAEP's zone explicitly (`now() AT TIME ZONE ...`) rather than via a
+# session `SET TIME ZONE`: Supabase's transaction pooler hands each transaction to a different
+# server connection, so session settings don't stick. Only plain zone names are accepted.
 TIMEZONE = os.environ.get("LVAEP_TZ", "America/New_York")
+if not re.match(r"^[A-Za-z0-9_+./-]+$", TIMEZONE):
+    raise ValueError(f"LVAEP_TZ must be a zone name such as America/New_York, not {TIMEZONE!r}")
 
 _LITERAL = re.compile(r"'(?:[^']|'')*'")
 
@@ -81,9 +87,9 @@ def translate(sql):
                 "ORDER BY ordinal_position"), False
     if _PRAGMA.match(sql):
         return "SELECT 1 WHERE false", False
-    sql = _NOW_LOCAL.sub("to_char(LOCALTIMESTAMP, 'YYYY-MM-DD HH24:MI:SS')", sql)
+    sql = _NOW_LOCAL.sub(f"to_char(now() AT TIME ZONE '{TIMEZONE}', 'YYYY-MM-DD HH24:MI:SS')", sql)
     sql = _NOW_UTC.sub("to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')", sql)
-    sql = _DATE_LOCAL.sub("to_char(CURRENT_DATE, 'YYYY-MM-DD')", sql)
+    sql = _DATE_LOCAL.sub(f"to_char((now() AT TIME ZONE '{TIMEZONE}')::date, 'YYYY-MM-DD')", sql)
     ignore = False
     m = _INSERT_OR.match(sql)
     if m:
@@ -172,23 +178,29 @@ def _row_factory(cursor):
 
 # ---------- connection ----------
 
+# prepare_threshold=None keeps Supabase's connection pooler happy (no server-side prepared statements).
+CONNECT_KWARGS = {"autocommit": False, "prepare_threshold": None, "row_factory": _row_factory, "connect_timeout": 15}
+
+
+def pooled():
+    """A long-running server keeps a small connection pool. A serverless function (Vercel) opens one
+    connection per request instead: its process may be frozen between requests, which breaks a
+    pool's background thread, and the database's own pooler already multiplexes connections.
+    LVAEP_PG_POOL=0 forces per-request connections; any other number sets the pool size."""
+    setting = os.environ.get("LVAEP_PG_POOL", "").strip()
+    if setting:
+        return setting != "0"
+    return not (os.environ.get("VERCEL") or os.environ.get("LVAEP_SERVERLESS") == "1")
+
+
 def _get_pool(url):
     global _pool
     with _pool_lock:
         if _pool is None:
             from psycopg_pool import ConnectionPool
 
-            def configure(conn):
-                conn.execute(f"SET TIME ZONE '{TIMEZONE}'")
-                conn.commit()
-
-            _pool = ConnectionPool(
-                url, min_size=1, max_size=int(os.environ.get("LVAEP_PG_POOL", "5")), open=True, timeout=30,
-                configure=configure,
-                # prepare_threshold=None keeps Supabase's connection pooler happy.
-                kwargs={"autocommit": False, "prepare_threshold": None, "row_factory": _row_factory,
-                        "connect_timeout": 15},
-            )
+            _pool = ConnectionPool(url, min_size=1, max_size=int(os.environ.get("LVAEP_PG_POOL") or "5"),
+                                   open=True, timeout=30, kwargs=CONNECT_KWARGS)
             with _pool.connection() as conn:
                 _refresh_id_tables(conn)
             atexit.register(close_pool)
@@ -196,15 +208,24 @@ def _get_pool(url):
 
 
 def _refresh_id_tables(conn):
+    global _id_tables_loaded
     rows = conn.execute(
         "SELECT table_name FROM information_schema.columns WHERE table_schema = current_schema() AND column_name = 'id'"
     ).fetchall()
     _tables_with_id.update(r[0] for r in rows)
+    _id_tables_loaded = True
 
 
 def connect(url):
-    pool = _get_pool(url)
-    return PgConnection(pool, pool.getconn())
+    if pooled():
+        pool = _get_pool(url)
+        return PgConnection(pool, pool.getconn())
+    import psycopg
+    conn = psycopg.connect(url, **CONNECT_KWARGS)
+    if not _id_tables_loaded:
+        _refresh_id_tables(conn)
+        conn.commit()
+    return PgConnection(None, conn)
 
 
 def close_pool():
@@ -305,7 +326,10 @@ class PgConnection:
             try:
                 self._conn.rollback()
             finally:
-                self._pool.putconn(self._conn)
+                if self._pool is None:
+                    self._conn.close()
+                else:
+                    self._pool.putconn(self._conn)
                 self._conn = None
 
     def __enter__(self):

@@ -236,16 +236,43 @@ def is_empty(conn):
         return True
 
 
+def has_demo_data(conn):
+    """True if the synthetic demo data was ever loaded into this database (seed.py leaves an audit row)."""
+    try:
+        return conn.execute("SELECT 1 FROM audit_log WHERE action = 'seed' LIMIT 1").fetchone() is not None
+    except Exception:
+        conn.rollback()
+        return False
+
+
 # ---------- time ----------
+
+# All dates and timestamps are LVAEP's local time, whatever time zone the server runs in
+# (hosting services such as Vercel run in UTC). LVAEP_TZ overrides the zone.
+TZ_NAME = os.environ.get("LVAEP_TZ", "America/New_York")
+
+
+def _zone():
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(TZ_NAME)
+    except Exception:  # unknown zone or no tz database: fall back to the system clock
+        return None
+
+
+def now():
+    """The current local (LVAEP) wall-clock time, without tzinfo."""
+    return dt.datetime.now(_zone()).replace(tzinfo=None)
+
 
 def today():
     """Today's date; LVAEP_TODAY=YYYY-MM-DD overrides it for demos and tests."""
     override = os.environ.get("LVAEP_TODAY")
-    return dt.date.fromisoformat(override) if override else dt.date.today()
+    return dt.date.fromisoformat(override) if override else now().date()
 
 
 def now_iso():
-    return dt.datetime.now().replace(microsecond=0).isoformat(sep=" ")
+    return now().replace(microsecond=0).isoformat(sep=" ")
 
 
 def month_bounds(month):
@@ -306,7 +333,8 @@ def check_password(password, stored):
 # ---------- shared queries ----------
 
 def audit(conn, user_id, action, detail=""):
-    conn.execute("INSERT INTO audit_log (user_id, action, detail) VALUES (?, ?, ?)", (user_id, action, detail))
+    conn.execute("INSERT INTO audit_log (user_id, action, detail, created_at) VALUES (?, ?, ?, ?)",
+                 (user_id, action, detail, now_iso()))
 
 
 def notify(conn, user_id, kind, message, link=""):

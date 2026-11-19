@@ -1,0 +1,16 @@
+# Not uploaded to Vercel (the site only needs api/, app/, static/ and requirements.txt).
+.venv
+data
+tests
+docs
+routine_updates
+*.pdf
+__pycache__
+*.pyc
+.env
+.DS_Store
+.git
+README.md
+check_setup.py
+bootstrap_admin.py
+server.py

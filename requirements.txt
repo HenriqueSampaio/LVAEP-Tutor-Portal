@@ -1,2 +1,4 @@
 # Only needed when DATABASE_URL points at Postgres/Supabase. SQLite needs nothing extra.
 psycopg[binary,pool]>=3.2,<4
+# Time-zone database for hosts without a system one (dates are kept in America/New_York).
+tzdata
