@@ -24,7 +24,8 @@ def application(environ, start_response):
         length = 0
     body = environ["wsgi.input"].read(length) if length > 0 else b""
 
-    server.ensure_initialized()
+    if path.startswith("/api/") or path.startswith("/export/") or path == "/print":
+        server.ensure_initialized()  # static files never need the database
     resp = server.handle(method, raw_path, server.Headers(headers.items()), body)
     try:
         phrase = HTTPStatus(resp.status).phrase
