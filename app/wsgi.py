@@ -4,6 +4,8 @@ hosts the daily job at /api/cron/daily runs the reminder schedule and sends queu
 
     from app.wsgi import app
 """
+import json
+import traceback
 from http import HTTPStatus
 
 from . import server
@@ -24,9 +26,15 @@ def application(environ, start_response):
         length = 0
     body = environ["wsgi.input"].read(length) if length > 0 else b""
 
-    if path.startswith("/api/") or path.startswith("/export/") or path == "/print":
-        server.ensure_initialized()  # static files never need the database
-    resp = server.handle(method, raw_path, server.Headers(headers.items()), body)
+    try:
+        if path.startswith("/api/") or path.startswith("/export/") or path == "/print":
+            server.ensure_initialized()  # static files never need the database
+        resp = server.handle(method, raw_path, server.Headers(headers.items()), body)
+    except Exception:  # database unreachable or misconfigured: say so, instead of the host's generic error page
+        traceback.print_exc()
+        resp = server.Response(503, json.dumps({"error": "The site's database isn't reachable right now. "
+                                                         "Please try again in a minute."}),
+                               headers={"Retry-After": "60"})
     try:
         phrase = HTTPStatus(resp.status).phrase
     except ValueError:
