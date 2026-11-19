@@ -22,7 +22,8 @@ from urllib.parse import parse_qs, urlparse
 
 from . import db, exports, mailer, reminders
 
-STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
+# The single-page app. (Named public/ because that is the folder Vercel serves from its CDN.)
+STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "public")
 TOKEN_DAYS = 14
 COOKIE = "lvaep_session"
 
@@ -1082,7 +1083,7 @@ STATIC_TYPES = {".html": "text/html", ".js": "text/javascript", ".css": "text/cs
 
 
 def static_response(path):
-    """A file from static/ (the single-page app); anything unknown gets index.html."""
+    """A file from public/ (the single-page app); anything unknown gets index.html."""
     if path in ("/", ""):
         path = "/index.html"
     full = os.path.normpath(os.path.join(STATIC_DIR, path.lstrip("/")))

@@ -1,4 +1,6 @@
-# Not uploaded to Vercel (the site only needs api/, app/, static/ and requirements.txt).
+# Not uploaded to Vercel. The site needs index.py, app/, public/ and requirements.txt only.
+# (server.py is excluded on purpose: Vercel's Python preset looks for an entrypoint named
+# server.py before index.py, and ours has no `app` in it.)
 .venv
 data
 tests
@@ -8,6 +10,8 @@ routine_updates
 __pycache__
 *.pyc
 .env
+.env.*
+!.env.example
 .DS_Store
 .git
 README.md

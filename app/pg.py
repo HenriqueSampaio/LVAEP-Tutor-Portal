@@ -181,6 +181,31 @@ def _row_factory(cursor):
 # prepare_threshold=None keeps Supabase's connection pooler happy (no server-side prepared statements).
 CONNECT_KWARGS = {"autocommit": False, "prepare_threshold": None, "row_factory": _row_factory, "connect_timeout": 15}
 
+# Optional: keep this app's tables in their own schema (tests and shared development projects use
+# this so they never touch the live tables in `public`). Needs a session-mode connection (port 5432
+# on Supabase): the setting is per connection, and transaction pooling doesn't keep it.
+SCHEMA = os.environ.get("LVAEP_PG_SCHEMA", "").strip()
+if SCHEMA and not re.match(r"^[a-z_][a-z0-9_]*$", SCHEMA):
+    raise ValueError(f"LVAEP_PG_SCHEMA must be a plain lowercase identifier, not {SCHEMA!r}")
+
+
+def _with_ssl(url):
+    """Remote databases get sslmode=require unless the URL says otherwise (psycopg defaults to 'prefer')."""
+    from urllib.parse import urlsplit
+    if "sslmode=" in url or "://" not in url:
+        return url
+    host = urlsplit(url).hostname or ""
+    if host in ("localhost", "127.0.0.1", "::1", ""):
+        return url
+    return url + ("&" if "?" in url else "?") + "sslmode=require"
+
+
+def _prepare(conn):
+    if SCHEMA:
+        conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{SCHEMA}"')
+        conn.execute(f'SET search_path TO "{SCHEMA}", public, extensions')
+        conn.commit()
+
 
 def pooled():
     """A long-running server keeps a small connection pool. A serverless function (Vercel) opens one
@@ -199,8 +224,8 @@ def _get_pool(url):
         if _pool is None:
             from psycopg_pool import ConnectionPool
 
-            _pool = ConnectionPool(url, min_size=1, max_size=int(os.environ.get("LVAEP_PG_POOL") or "5"),
-                                   open=True, timeout=30, kwargs=CONNECT_KWARGS)
+            _pool = ConnectionPool(_with_ssl(url), min_size=1, max_size=int(os.environ.get("LVAEP_PG_POOL") or "5"),
+                                   open=True, timeout=30, kwargs=CONNECT_KWARGS, configure=_prepare)
             with _pool.connection() as conn:
                 _refresh_id_tables(conn)
             atexit.register(close_pool)
@@ -221,7 +246,8 @@ def connect(url):
         pool = _get_pool(url)
         return PgConnection(pool, pool.getconn())
     import psycopg
-    conn = psycopg.connect(url, **CONNECT_KWARGS)
+    conn = psycopg.connect(_with_ssl(url), **CONNECT_KWARGS)
+    _prepare(conn)
     if not _id_tables_loaded:
         _refresh_id_tables(conn)
         conn.commit()

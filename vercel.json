@@ -1,0 +1,15 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "python",
+  "regions": ["iad1"],
+  "functions": {
+    "index.py": {
+      "maxDuration": 60,
+      "includeFiles": "public/**",
+      "excludeFiles": "{tests/**,docs/**,data/**,**/*.pdf}"
+    }
+  },
+  "crons": [
+    { "path": "/api/cron/daily", "schedule": "0 13 * * *" }
+  ]
+}

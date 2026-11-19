@@ -132,21 +132,20 @@ Details:
 - **Test addresses:** addresses on reserved test domains (`*.example`, `example.com`, `*.test`, …), like the
   demo accounts, are never actually emailed, unless `EMAIL_REDIRECT_TO` is set.
 
-## 5. Hosting (when the team is ready)
+## 5. Hosting
 
-This app is a long-running Python server. It also runs the reminder schedule and the email sender in the
-background, so it needs a host that keeps it running all the time. Serverless hosts like Vercel or Netlify
-won't work.
+The live site runs on **Vercel** with this Supabase database — see **[docs/DEPLOY.md](DEPLOY.md)** for the
+exact steps (project link, environment variables, first admin login, redeploys, the daily job).
 
-- **Railway** (Hobby, $5/month, includes $5 of usage). A small app like this should fit in that.
-  Start command: `pip install -r requirements.txt && python3 server.py --host 0.0.0.0`
-  (the port comes from Railway automatically).
-- **Render**: its free plan shuts the app down after 15 minutes without visitors, which would stop reminders
-  and emails, so it needs a paid plan.
-- On either host, set the same variables as in `.env` in the host's settings, and set `APP_URL` to the
-  site's address. The host provides HTTPS.
-- Put the host in the same region as the Supabase project (US East). Every page makes several database
-  queries, and a distant host makes each one slower.
+Vercel is a serverless host: there are no background threads there. The app handles that itself
+(`app/wsgi.py` + `index.py`): queued emails are delivered at the end of the request that queued them, and
+Vercel Cron calls `/api/cron/daily` once a day to run the reminder schedule and retry any failed emails.
+Without a `RESEND_API_KEY`, emails on Vercel are kept in the database ("stored" mode, previewable by staff
+under Reminders → Recent emails) because the function has no writable disk.
+
+If you ever prefer a long-running host instead (Railway, Render, a VPS), `python3 server.py --host 0.0.0.0`
+still works unchanged: the reminder scheduler and the email worker run as threads, and emails are saved to
+`data/outbox/` until Resend is configured. Keep the host in the same region as the database (US East).
 
 ## 6. What it costs LVAEP
 

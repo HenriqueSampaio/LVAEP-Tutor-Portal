@@ -105,7 +105,7 @@ def form_data(conn, tutor_id, student_id, month):
 
 
 def attendance_form(conn, tutor_id, student_id, month):
-    """One printable form as an HTML <section> (styled by static/print-form.css)."""
+    """One printable form as an HTML <section> (styled by public/print-form.css)."""
     d = form_data(conn, tutor_id, student_id, month)
     b = d["bundle"]
     head = "".join(f"<th>{db.month_bounds(m)[0]:%b}</th>" for m in d["months"])

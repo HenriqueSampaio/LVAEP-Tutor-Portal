@@ -55,6 +55,16 @@ class TranslateTest(unittest.TestCase):
         r = Row((1, "Ana"))
         self.assertEqual((r["name"], r[0], dict(r)), ("Ana", 1, {"id": 1, "name": "Ana"}))
 
+    def test_remote_urls_default_to_ssl(self):
+        self.assertEqual(pg._with_ssl("postgresql://u:p@aws-0-us-east-1.pooler.supabase.com:6543/postgres"),
+                         "postgresql://u:p@aws-0-us-east-1.pooler.supabase.com:6543/postgres?sslmode=require")
+        self.assertEqual(pg._with_ssl("postgresql://u:p@db.example.org/x?application_name=lvaep"),
+                         "postgresql://u:p@db.example.org/x?application_name=lvaep&sslmode=require")
+        self.assertEqual(pg._with_ssl("postgresql://postgres@127.0.0.1:5432/lvaep_test"),
+                         "postgresql://postgres@127.0.0.1:5432/lvaep_test")
+        self.assertEqual(pg._with_ssl("postgresql:///lvaep_test"), "postgresql:///lvaep_test")
+        self.assertEqual(pg._with_ssl("postgresql://u:p@h/x?sslmode=disable"), "postgresql://u:p@h/x?sslmode=disable")
+
 
 if __name__ == "__main__":
     unittest.main()

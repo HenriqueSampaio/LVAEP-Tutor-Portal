@@ -15,10 +15,12 @@ python3 server.py            # http://localhost:8070 — loads demo data on firs
 python3 server.py --reset    # wipe and reload the demo data
 python3 server.py --reset --empty   # empty system with one admin (admin@lvaep.example / demo1234)
 python3 server.py --host 0.0.0.0    # open it from a phone on the same Wi-Fi
-python3 -m unittest discover -s tests -t . -v   # acceptance, calendar and print tests (30)
+python3 -m unittest discover -s tests -t . -v   # acceptance, calendar, print, email, Postgres and WSGI tests (58)
 ```
 
-Demo accounts (password `demo1234`): **dana@lvaep.example** (staff), **maria@tutors.example** and **james@tutors.example** (tutors). The login page has one-click buttons for them.
+Demo accounts (password `demo1234`): **dana@lvaep.example** (staff), **maria@tutors.example** and **james@tutors.example** (tutors). The login page offers one-click buttons for them whenever the demo data is loaded (and only then).
+
+**The live site** (client evaluation, no demo data) runs on Vercel with a Supabase Postgres database — see **[docs/DEPLOY.md](docs/DEPLOY.md)**. On a Postgres database `server.py` never loads demo data unless you pass `--demo`; the first real staff login is created with `python3 bootstrap_admin.py --name "Full Name" --email person@example.org`.
 
 Set `LVAEP_TODAY=2026-10-31` to pretend it's another day (e.g. to see the last-day-of-month reminder).
 
@@ -76,7 +78,8 @@ app/server.py          HTTP server + JSON API, role/assignment access checks, /a
 app/reminders.py       month-end / overdue / weekly reminder rules (run every 30 min, idempotent)
 app/exports.py         CSV exports and the official attendance & achievement form
 app/seed.py            synthetic demo data, generated relative to today
-static/                single-page app (vanilla JS, no build step); print-form.css styles the printed form
+public/                single-page app (vanilla JS, no build step); print-form.css styles the printed form
+app/wsgi.py + index.py the same app as a WSGI callable, for Vercel (see docs/DEPLOY.md)
 tests/test_acceptance.py  end-to-end API tests
 tests/test_calendar.py    calendar scheduling, approval and permission tests
 tests/test_print.py       the printed form's grid, goals, STOPPED box and access
