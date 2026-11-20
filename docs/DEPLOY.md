@@ -65,7 +65,7 @@ Things that differ from `python3 server.py` on a laptop, all handled in code:
    npx vercel link --yes --project lvaep-tutor-portal      # framework auto-detects as "Python"
    grep '^DATABASE_URL=' .env | cut -d= -f2- | sed 's/:5432\//:6543\//' \
      | npx vercel env add DATABASE_URL --environment production
-   openssl rand -hex 24 | npx vercel env add CRON_SECRET --environment production
+   printf '%s' "$(openssl rand -hex 24)" | npx vercel env add CRON_SECRET production --sensitive   # no trailing newline
    echo stored | npx vercel env add EMAIL_MODE --environment production
    npx vercel --prod --yes                                   # prints the production URL
    echo https://<the production URL> | npx vercel env add APP_URL --environment production
@@ -74,6 +74,10 @@ Things that differ from `python3 server.py` on a laptop, all handled in code:
    ```
    `APP_URL` is the address used inside emails and email previews; without it the code falls back to the
    Vercel-provided production URL, but set it explicitly.
+   Variables added with `--sensitive` can never be read back (`vercel env pull` writes `[SENSITIVE]`), so keep
+   `CRON_SECRET` in a password manager if you want to call the cron path by hand. To replace a variable, add it
+   again with `--force`; `vercel env rm` asks for interactive confirmation. Env changes only reach the site on
+   the next deployment (`npx vercel --prod`).
 5. **Smoke test** the production URL: `/` loads, `/api/meta` answers JSON, sign in with the bootstrap
    account, create a tutor, a student and an assignment, log a session, submit, print the form.
 
