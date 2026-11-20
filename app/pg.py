@@ -295,11 +295,11 @@ def _refresh_id_tables(conn):
 
 
 def connect(url):
+    _refuse_transaction_pooler(url)  # before the pool too: the check must not depend on how we connect
     if pooled():
         pool = _get_pool(url)
         return PgConnection(pool, pool.getconn())
     import psycopg
-    _refuse_transaction_pooler(url)
     conn = psycopg.connect(_with_ssl(url), **CONNECT_KWARGS)
     try:
         _prepare(conn)

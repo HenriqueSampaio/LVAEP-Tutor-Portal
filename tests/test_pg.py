@@ -68,10 +68,13 @@ class TranslateTest(unittest.TestCase):
     def test_schema_isolation_refuses_the_transaction_pooler(self):
         from unittest import mock
         with mock.patch.object(pg, "SCHEMA", "lvaep_test"):
-            with self.assertRaises(RuntimeError):
-                pg.connect("postgresql://u:p@aws-0-us-east-1.pooler.supabase.com:6543/postgres")
+            for pooled in (True, False):  # refused whether or not a connection pool is in use
+                with mock.patch.object(pg, "pooled", lambda: pooled):
+                    with self.assertRaises(RuntimeError):
+                        pg.connect("postgresql://u:p@aws-0-us-east-1.pooler.supabase.com:6543/postgres")
             self.assertIsNone(pg._refuse_transaction_pooler("postgresql://u:p@aws-0-us-east-1.pooler.supabase.com:5432/postgres"))
-        self.assertIsNone(pg._refuse_transaction_pooler("postgresql://u:p@h:6543/postgres"))  # no schema set: fine
+        with mock.patch.object(pg, "SCHEMA", ""):  # no schema isolation: the transaction pooler is fine
+            self.assertIsNone(pg._refuse_transaction_pooler("postgresql://u:p@h:6543/postgres"))
 
     def test_connection_errors_are_recognised_through_psycopg_subclasses(self):
         from app import db
