@@ -10,8 +10,8 @@ How the live site is built, how it was set up, and how to operate it. The client
 | Piece | Where | Notes |
 |---|---|---|
 | Web app (`public/`) | Vercel CDN | Served as static files at `/`, `/app.js`, `/styles.css`, … with the security headers from `vercel.json`. |
-| API (`index.py` → `app/wsgi.py` → `app/server.py`) | One Vercel Python function (Fluid compute, region `iad1`) | Every path that isn't a file in `public/` reaches it. Vercel's **Python framework preset** does this routing on its own (it's auto-detected from `requirements.txt`), so `vercel.json` has no rewrites. |
-| Database | Supabase Postgres, AWS `us-east-1` | Reached through the **transaction pooler** (port 6543). One connection per request (automatic when `VERCEL` is set). |
+| API (`index.py` → `app/wsgi.py` → `app/server.py`) | One Vercel Python function (Fluid compute, region `pdx1` = AWS us-west-2, next to the database) | Every path that isn't a file in `public/` reaches it. Vercel's **Python framework preset** does this routing on its own (it's auto-detected from `requirements.txt`), so `vercel.json` has no rewrites. |
+| Database | Supabase Postgres 17, project `rbsjfcwqsaommyrepxln`, AWS `us-west-2` | Reached through the **pooler** host `aws-1-us-west-2.pooler.supabase.com` — port 6543 (transaction mode) from Vercel, 5432 (session mode) from a laptop. One connection per request (automatic when `VERCEL` is set). The direct host `db.<ref>.supabase.co` is IPv6-only and is not used. |
 | Daily job | Vercel Cron → `GET /api/cron/daily` | Runs the reminder rules and delivers queued email. Hobby plan: once a day, within an hour of the scheduled time (`0 13 * * *` UTC ≈ 8–10 AM Eastern). Protected by `CRON_SECRET`; safe to call twice. |
 | Email | `EMAIL_MODE=stored` until Resend + LVAEP's domain are set up | Emails are kept in the database and previewable by staff (sign-in links are blanked once stored). See SETUP.md §4 to switch sending on. |
 
@@ -31,9 +31,13 @@ Things that differ from `python3 server.py` on a laptop, all handled in code:
 
 ## One-time setup (done for the current site on Nov 19, 2026; repeat for a new environment)
 
-1. **Supabase project** (supabase.com → New project; region East US; save the database password).
-   *Connect* → copy a pooler string into `.env` as `DATABASE_URL=…` (never commit `.env`). Either pooler
-   works locally; the deploy step below converts it to the transaction pooler (port 6543) for Vercel.
+1. **Supabase project** (supabase.com → New project; save the database password). The live project is in
+   West US (Oregon, `us-west-2`); `vercel.json` pins the function to the matching Vercel region `pdx1` —
+   change both together if a new project is created elsewhere.
+   *Connect* → copy the **Session pooler** string (`postgres.<ref>@aws-N-<region>.pooler.supabase.com:5432`)
+   into `.env` as `DATABASE_URL=…` (never commit `.env`). Don't use the "direct connection" string
+   (`db.<ref>.supabase.co`): it is IPv6-only, which Vercel functions can't reach. The deploy step below
+   converts the session string to the transaction pooler (port 6543) for Vercel.
 2. **Run the tests on Postgres — against a throwaway database, never the live project once it holds data.**
    The suite drops and recreates its tables. Safe options:
    - a second Supabase project (free) or a local Postgres, or

@@ -38,13 +38,13 @@ Using one shared project for the team's development is simplest.
 
 1. Go to [supabase.com](https://supabase.com) → **New project**.
    - Name: `lvaep-tutor-portal-dev`.
-   - Region: **East US (North Virginia)**, closest to New Jersey.
+   - Region: any US region works for a dev project. The live site's project is in **West US (Oregon)**; if a new project will serve the live site, put it in the region that matches `regions` in `vercel.json` (see DEPLOY.md).
    - Set a **database password** and save it in a password manager. You'll need it in step 3.
 2. Wait for the project to finish setting up (about a minute).
 3. Click **Connect** at the top of the project page. Under **Session pooler**, copy the connection string.
    Replace `[YOUR-PASSWORD]` with your database password and paste it into `.env`:
    ```
-   DATABASE_URL=postgresql://postgres.abcdefghijklmnop:YOUR-DB-PASSWORD@aws-0-us-east-1.pooler.supabase.com:5432/postgres
+   DATABASE_URL=postgresql://postgres.abcdefghijklmnop:YOUR-DB-PASSWORD@aws-1-us-west-2.pooler.supabase.com:5432/postgres   # host varies by region
    ```
    - **Use the Session pooler, not "Direct connection".** On the free plan the direct connection only works over IPv6, which most home and campus networks don't have.
    - The **Transaction pooler** (port 6543) is what the Vercel deployment uses (see DEPLOY.md). It also works

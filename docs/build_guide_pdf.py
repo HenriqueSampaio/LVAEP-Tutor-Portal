@@ -301,7 +301,7 @@ def build(out_path):
                              "permissions and produces the forms and CSVs. Runs as a serverless function: it starts on "
                              "demand and costs nothing when idle.", "Vercel"],
                   ["Database", "PostgreSQL holding accounts, students, assignments, sessions, reports, calendar, "
-                               "notifications, the email log and the audit trail.", "Supabase, AWS us-east-1 (N. Virginia)"],
+                               "notifications, the email log and the audit trail.", "Supabase, AWS us-west-2 (Oregon)"],
                   ["Daily job", "Once a day the host calls the site's scheduled-task address, which runs the reminder "
                                 "rules and delivers any queued emails. Protected by a secret.", "Vercel Cron"],
                   ["Code", "Open repository with tests (57 automated tests run on SQLite and PostgreSQL).",

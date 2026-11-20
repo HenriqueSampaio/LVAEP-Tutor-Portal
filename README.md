@@ -15,7 +15,7 @@ python3 server.py            # http://localhost:8070 — loads demo data on firs
 python3 server.py --reset    # wipe and reload the demo data
 python3 server.py --reset --empty   # empty system with one admin (admin@lvaep.example; a temporary password is printed)
 python3 server.py --host 0.0.0.0    # open it from a phone on the same Wi-Fi
-python3 -m unittest discover -s tests -t . -v   # acceptance, calendar, print, email, Postgres and WSGI tests (58)
+python3 -m unittest discover -s tests -t . -v   # acceptance, calendar, print, email, Postgres and WSGI tests (69)
 ```
 
 Demo accounts (password `demo1234`): **dana@lvaep.example** (staff), **maria@tutors.example** and **james@tutors.example** (tutors). The login page offers one-click buttons for them whenever the demo data is loaded (and only then).
