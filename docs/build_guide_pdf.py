@@ -179,7 +179,8 @@ def build(out_path):
               steps([
                   "Go to <b>Students → Add student</b>: first and last name, program (default ESL), enrollment date, notes.",
                   "Open a student to see their tutors, this fiscal year's hours by month, and their status.",
-                  "<b>Status.</b> <i>Pause</i> keeps the student but hides them from the month's reports. <i>Drop</i> asks "
+                  "<b>Status.</b> <i>Pause</i> is for a short break: the student stays on the tutor's list and in the month's "
+                  "reports, marked Paused, until you press <i>Resume</i>. <i>Drop</i> asks "
                   "for a date and reason, ends all of the student's assignments and is <b>permanent</b>: only a staff "
                   "member can readmit, and the site asks for an explicit confirmation (as agreed in the kickoff meeting).",
               ]),
@@ -201,7 +202,7 @@ def build(out_path):
                   "a note). The proposal is <i>Pending</i> until the tutor approves or rejects it; the tutor is notified.",
                   "<b>Tutors:</b> add their own sessions (confirmed immediately), approve or reject staff proposals under "
                   "<b>Requests</b>, and cancel with a reason. The calendar refuses two confirmed sessions that overlap.",
-                  "Month, week and day views all work on a phone. After a session has happened, <b>Log hours</b> on it "
+                  "Month, week and day views all work on a phone. After a session has happened, open it and click the student's name under <b>Log hours for the monthly report</b>; it "
                   "opens the hours form pre-filled, so scheduling and reporting stay in step.",
                   "Scheduled sessions do <i>not</i> count as hours by themselves: the tutor still logs the hours.",
               ]),
@@ -213,7 +214,7 @@ def build(out_path):
                   "Cancelled), tutoring hours and homework hours in quarter-hour steps (up to 8 each), and a note. Only "
                   "<i>Present</i> entries carry hours. One entry per student per day; no future dates; the date must fall "
                   "inside the assignment period.",
-                  "On the student's month page the tutor also ticks <b>goals attained</b> (the official form's list, A–D, "
+                  "On the student's month page the tutor also ticks the goals under <b>Achievements this month</b> (the official form's list, A–D, "
                   "plus an \"Other\" line and notes) and, if the student stopped, the <b>leaving date and reason</b> — "
                   "staff are notified so they can update the student's status.",
                   "<b>Submit month</b> locks the month. A second submission is refused; after that, only staff can change "
@@ -228,7 +229,7 @@ def build(out_path):
                   "the month reopens for them), or correct entries yourself. Every staff change is written to the "
                   "<b>Activity log</b>.",
                   "<b>Print submitted forms</b> produces LVAEP's <i>Student Monthly Attendance &amp; Achievement Form</i>, "
-                  "one page per student, with each day's hours by fiscal-year month (July–June), monthly totals, goals "
+                  "one page per tutor–student pair (a student with two tutors gets two pages), with each day's hours by fiscal-year month (July–June), monthly totals, goals "
                   "attained so far this year, the STOPPED box, site, days and times. Use your browser's Print → "
                   "<i>Save as PDF</i>. A single student's form prints from their report page (<b>Print form</b> or "
                   "Ctrl/Cmd+P).",
